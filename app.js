@@ -429,6 +429,20 @@ function categorySeries(history, categoryId) {
   return history.months.map((mo) => ({ key: mo.key, y: mo.y, m: mo.m, minor: mo.totals.get(categoryId) || 0 }));
 }
 
+// "All": one total per month for the history's direction, summed across EVERY
+// category total in that month. Because it sums everything categoryHistory
+// kept (not a list of known categories), it includes spend under deleted
+// categories and under ids with no category record at all, i.e. exactly what
+// monthTotals() counts, so it can never disagree with the Summary panel.
+// Same window and explicit zeros as categorySeries.
+function totalSeries(history) {
+  return history.months.map((mo) => {
+    let minor = 0;
+    mo.totals.forEach((v) => { minor += v; });
+    return { key: mo.key, y: mo.y, m: mo.m, minor };
+  });
+}
+
 // What the category switcher offers for a history: every live category of
 // this direction (even with zero spend, so "I spent nothing" is a visible
 // answer), then deleted categories that have spend in the window labelled
@@ -2864,15 +2878,16 @@ let trendsCatId = null;
 let trendsTodayOverride = null;
 function trendsToday() { return trendsTodayOverride || new Date(); }
 
-// Default selection: the option with the most spend in the window (first
-// wins a tie, so the switcher order stays predictable). A selection that is
-// still offered is kept; a stale one (direction changed, category gone)
-// falls back to the default. No options -> null.
+// Default selection: "All" (2026-10-04, reverses the earlier "biggest
+// category" default: the overview comes before the detail). A selection that
+// is still offered is kept; a stale one (direction changed, category gone)
+// falls back to All. If All is somehow absent, the first option; no options
+// -> null.
+const TRENDS_ALL = "__all__";
 function pickTrendsCategory(options, current) {
   if (current && options.some((o) => o.id === current)) return current;
-  let best = null;
-  options.forEach((o) => { if (best === null || o.total > best.total) best = o; });
-  return best ? best.id : null;
+  if (options.some((o) => o.id === TRENDS_ALL)) return TRENDS_ALL;
+  return options.length ? options[0].id : null;
 }
 
 function shortMonthLabel(y, m) {
@@ -2907,18 +2922,26 @@ function renderTrendsView() {
     return;
   }
 
-  const options = historyCategoryOptions(state.categories, history);
+  // "All" first: the total for this direction across every category, deleted
+  // and unknown ones included. Its figure is the sum of the window, so the
+  // option carries a total like any other.
+  const allTotal = totalSeries(history).reduce((sum, r) => sum + r.minor, 0);
+  const options = [{ id: TRENDS_ALL, label: "All", deleted: false, total: allTotal }]
+    .concat(historyCategoryOptions(state.categories, history));
   trendsCatId = pickTrendsCategory(options, trendsCatId);
   sel.disabled = false;
   sel.innerHTML = options.map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.label)}</option>`).join("");
   sel.value = trendsCatId;
 
-  const series = categorySeries(history, trendsCatId);
+  const isAll = trendsCatId === TRENDS_ALL;
+  const series = isAll ? totalSeries(history) : categorySeries(history, trendsCatId);
   const max = series.reduce((mx, r) => Math.max(mx, r.minor), 0);
   // find() on state.categories, not catById(): a deleted category's tombstone
-  // still carries its colour, and its history must keep drawing in it.
+  // still carries its colour, and its history must keep drawing in it. All is
+  // not one category, so it draws in neutral ink (never a category colour,
+  // never red).
   const cat = state.categories.find((c) => c.id === trendsCatId);
-  const color = cat ? cat.color : "var(--muted)";
+  const color = isAll ? "var(--ink)" : (cat ? cat.color : "var(--muted)");
   const nowKey = monthKey(endY, endM);
   // Shared figure-column width: the longest exact label, plus half a character
   // of slack. Every row uses it, so every bar track is the same length.
@@ -3080,7 +3103,7 @@ function exposeTestHook() {
 
     formatMoney, formatCompact, parseAmountToMinor, monthTotals, sumByCategory,
     categoryHistory, categorySeries, historyCategoryOptions, HISTORY_MONTHS,
-    showTrendsView, pickTrendsCategory,
+    showTrendsView, pickTrendsCategory, totalSeries, TRENDS_ALL,
     setTrendsToday: (date) => { trendsTodayOverride = date; },
     getTrendsState: () => ({ dir: trendsDir, catId: trendsCatId }),
     getViewDir: () => viewDir,

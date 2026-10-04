@@ -1253,7 +1253,7 @@ Diagnosed rather than assumed:
 - **Cache-busting.** `index.html` loads `style.css?v=TOKEN` and
   `app.js?v=TOKEN` so a phone cannot serve a stale cached script beside a
   fresh page (the 2026-08-12 gotcha). TOKEN is a hand-bumped string (current:
-  `20261004b`), not a commit hash, because a commit cannot contain its own
+  `20261004c`), not a commit hash, because a commit cannot contain its own
   hash and there is no build step to inject one. **On every deploy that
   changes `app.js` or `style.css`, change TOKEN in BOTH tags** (date plus a
   letter, e.g. `20261015a`). A self-test fails if the two tokens differ or
@@ -1343,8 +1343,9 @@ existing `sumByCategory` and cross-checked against it, `monthTotals` and
   never `formatCompact`. Bars use the category's own colour, a deleted
   category's tombstone colour included. Zero months show an exact 0 and no
   bar at all. A selected category with no spend shows six zero rows.
-- **Default selection** is the category with the most spend in the window
-  (first wins a tie); a direction switch clears the selection so it re-picks.
+- **Default selection** was the category with the most spend in the window.
+  **Superseded the same day by "All" (see "Trends: All and the desktop cap"
+  below).** A direction switch clears the selection so it re-picks.
   Deleted categories appear only with spend in the window, as "Name (deleted)".
 - **Navigation.** The logo, the FAB and Back all return to the register;
   opening Budget or Recurring from Trends (the header is visible on every
@@ -1360,6 +1361,68 @@ existing `sumByCategory` and cross-checked against it, `monthTotals` and
   month count. Screenshots at 390px and 1280px checked by eye in headless
   Chrome. **Not real-device-verified.** Desktop note: at 1280px the bars
   stretch very wide (about 1600px); left as is, not requested.
+
+## General fixes (2026-10-04, Trends: All and the desktop cap)
+
+**"All" is the first option in the Trends switcher and the default.** Added
+after the first release, on Sebastian's request. Decisions, each with its
+reasoning:
+
+- **All follows the Spent/Income toggle; it never mixes income and expense.**
+  Spent shows total expenses per month, Income shows total income. Mixing
+  would break the app's no-mixing rule (every direction-aware surface splits
+  the two), and a combined net per month would be misleading for the
+  in-progress month: income often lands once (payday) while spend accrues
+  daily, so a partial-month net swings for reasons that say nothing about the
+  month.
+- **The default changed from "biggest category" to All. This REVERSES the
+  earlier decision recorded in the first Trends entry above.** Reason: the
+  overview comes before the detail. Opening on one arbitrary category (the
+  largest) answered a narrower question than the one a person usually has
+  first ("where is my month going overall"), and the biggest category is
+  one tap away in the switcher. Consequences: a direction switch with a
+  single category selected now re-picks All (not the biggest income
+  category), and with All selected it simply stays All. A stale or missing
+  selection falls back to All. `pickTrendsCategory` no longer looks at
+  totals at all; a regression test pins that All wins even when a single
+  category is bigger.
+- **All must equal `monthTotals` for every month in the window, both
+  directions.** It is built as the sum of every category total
+  `categoryHistory` kept for the month (`totalSeries`), not as a sum over
+  known categories, so it includes spend under deleted categories and under
+  ids with no category record (what the register shows as "Uncategorized"),
+  exactly like `monthTotals`. If it excluded either it would silently
+  disagree with the Summary panel. The self-test cross-checks the rendered
+  figures and the pure function against `monthTotals(entriesInMonth(...))`
+  for every month, for expenses and income.
+- **Same window rules, marker and scale as a single category:** at most 6
+  months, never before the earliest entry in that direction, zero months an
+  exact 0 with no bar, the current month "so far" and hatched, bars scaled to
+  the largest month. A direction with no entries shows the existing plain
+  empty state.
+- **Neutral ink fill for All, never a category colour, never red.** All is
+  not one category, so no category's colour should speak for it.
+- **Desktop cap.** At 1280px the bar track stretched to about 990px (more on
+  a wider screen). The list is capped at 720px (track about 470px). A
+  `max-width` only bites when the screen is wider than the cap, so the phone
+  layout is unchanged by construction; measured before and after in the same
+  scenario: track 60.8 / 100.8 / 130.8px at 320 / 360 / 390 identical, and
+  now pinned by a test, 709px at 1000px and 989px at 1280px both became 469px.
+  Chosen over capping only the track (which would leave the figure stranded
+  at the far edge of a wide box). The hint line and the switcher box above
+  stay full width.
+- **Verification.** Blocks 104 (updated for the new default), 105 (also 390px),
+  106 (All) and 107 (cap, plus phone widths pinned). Fail-first run: 4
+  failing (two guards, two cap checks with real numbers), then 1 failing
+  (my own ink-colour assertion compared an inline `var(--ink)` to an rgb
+  value; fixed to compare the computed colour), then 0. Twelve single-
+  behavior mutants all flip tests: All excluding deleted categories, All
+  dropping unknown-id spend, wrong default, a category colour in All, All not
+  following the toggle, direction switch not clearing the selection, no
+  partial marker in All, max instead of sum, All listed last, All renamed,
+  cap removed, cap too wide. One mutant run crashed on a Chrome launch
+  failure (harness, not a result) and was rerun alone. Screenshots checked at
+  390px and 1280px. **Not real-device-verified.**
 
 ## Testing before you claim it works
 
@@ -1868,6 +1931,10 @@ ledger-paper plainness *is* the trust signal.
      live entries) would hide where past money actually went.
    - Expense and income stay separate, using the same Spent/Income toggle
      as the rest of the app.
+   - **Added 2026-10-04, after first use: an "All" option, first in the
+     switcher and the DEFAULT, plus a desktop cap on the bar track.** Full
+     reasoning under "General fixes (2026-10-04, Trends: All and the desktop
+     cap)".
 
    **Cut, deliberately:** tooltips; gridlines and axis ticks; a budget
    overlay line (`budgetMinor` is today's value, not a per-month value, so

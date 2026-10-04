@@ -3156,19 +3156,23 @@ async function runTests(H,d){
       !!d.getElementById("trendsView") && visible("trendsView") && !visible("mainCols"));
 
     if (typeof H.showTrendsView!=="function" || typeof H.setTrendsToday!=="function" ||
-        typeof H.getTrendsState!=="function" || typeof H.pickTrendsCategory!=="function") {
-      assert("showTrendsView + setTrendsToday + getTrendsState + pickTrendsCategory are exposed (fail-first guard)", false);
+        typeof H.getTrendsState!=="function" || typeof H.pickTrendsCategory!=="function" ||
+        typeof H.totalSeries!=="function" || typeof H.TRENDS_ALL!=="string") {
+      assert("showTrendsView + setTrendsToday + getTrendsState + pickTrendsCategory + totalSeries + TRENDS_ALL are exposed (fail-first guard)", false);
       fresh(); return;
     }
 
-    // ---- pure default-selection rule
-    var P=H.pickTrendsCategory;
-    assert("default pick: the option with the largest window total",
-      P([{id:"a",total:5},{id:"b",total:9},{id:"c",total:1}],null)==="b");
-    assert("default pick: ties go to the first option (stable)", P([{id:"a",total:5},{id:"b",total:5}],null)==="a");
-    assert("default pick: a still-valid current selection is kept", P([{id:"a",total:5},{id:"b",total:9}],"a")==="a");
-    assert("default pick: a stale current selection is replaced by the default", P([{id:"a",total:5},{id:"b",total:9}],"zzz")==="b");
+    // ---- pure default-selection rule (2026-10-04: the default is All, the overview
+    //      before the detail; this REVERSES the earlier "largest category" default)
+    var P=H.pickTrendsCategory, ALL=H.TRENDS_ALL;
+    var optsAll=[{id:ALL,total:14},{id:"a",total:5},{id:"b",total:9}];
+    assert("default pick: All, even though a single category exists with spend", P(optsAll,null)===ALL);
+    assert("default pick: All wins regardless of which category is biggest", P([{id:ALL,total:3},{id:"a",total:1},{id:"b",total:2}],null)===ALL);
+    assert("default pick: a still-valid current selection is kept", P(optsAll,"a")==="a");
+    assert("default pick: All itself is kept when already selected", P(optsAll,ALL)===ALL);
+    assert("default pick: a stale current selection falls back to All, not to the biggest category", P(optsAll,"zzz")===ALL);
     assert("default pick: no options -> null", P([],null)===null);
+    assert("default pick: if All is somehow absent, the first option", P([{id:"a",total:5},{id:"b",total:9}],null)==="a");
 
     // ---- main scenario: today = 2026-10-15, so the window is May..Oct
     fresh(); H.setTrendsToday(new Date(2026,9,15));
@@ -3181,6 +3185,7 @@ async function runTests(H,d){
     log("2026-10-03",50000,"seed-dining");
     log("2026-08-12",70000,"seed-health");              // will be deleted below, spend IN the window
     log("2026-03-05",12300,"seed-utilities");           // will be deleted, spend only BEFORE the window
+    log("2026-07-05",11111,"ghost-id");                 // unknown category id, spend IN the window
     log("2026-09-25",2500000,"seed-salary","income");
     log("2026-10-01",100000,"seed-freelance","income");
     H.deleteCategory("seed-health"); H.deleteCategory("seed-utilities");
@@ -3189,8 +3194,9 @@ async function runTests(H,d){
 
     assert("rows: exactly 6, one per month May..Oct, oldest first (the March entry is outside the window)",
       rows().map(function(r){ return r.getAttribute("data-key"); }).join(",")==="2026-05,2026-06,2026-07,2026-08,2026-09,2026-10");
-    assert("default selection: the category with the most spend in the window (Groceries)",
-      d.getElementById("trendsCategory").value==="seed-groceries" && H.getTrendsState().catId==="seed-groceries");
+    assert("default selection is All (the overview before the detail), not the biggest category",
+      d.getElementById("trendsCategory").value===ALL && H.getTrendsState().catId===ALL);
+    pickCategory("seed-groceries");   // the per-category checks below are about Groceries
 
     var gro=H.catById("seed-groceries");
     var series={ "2026-05":200050,"2026-06":0,"2026-07":405075,"2026-08":100000,"2026-09":300000,"2026-10":150025 };
@@ -3257,15 +3263,15 @@ async function runTests(H,d){
     assert("direction switch: the toggle shows Income pressed",
       d.querySelector('#trendsDirToggle button[data-dir="income"]').getAttribute("aria-pressed")==="true" &&
       d.querySelector('#trendsDirToggle button[data-dir="expense"]').getAttribute("aria-pressed")==="false");
-    assert("direction switch re-picks the default: Salary (largest income), not the old expense choice",
-      d.getElementById("trendsCategory").value==="seed-salary");
+    assert("direction switch with a single category selected re-picks All (not the biggest category, not the old choice)",
+      d.getElementById("trendsCategory").value===ALL);
     assert("direction switch: income rows show the salary figure, and the window starts at the first INCOME entry (Sep, Oct)",
       rows().map(function(r){ return r.getAttribute("data-key"); }).join(",")==="2026-09,2026-10" &&
       numOf("2026-09")===H.formatMoney(2500000,"DKK"));
     assert("direction switch: no expense categories offered on the income side", optionLabels().indexOf("Groceries")===-1);
     clickDir("expense");
-    assert("switching back re-picks the default again (Groceries), the earlier Dining choice is not remembered",
-      d.getElementById("trendsCategory").value==="seed-groceries");
+    assert("switching back keeps All selected; the earlier Dining choice is not remembered",
+      d.getElementById("trendsCategory").value===ALL);
 
     // ---- an unknown id (no category record) with spend in BOTH directions is valid on both sides,
     //      so only clearing the selection on a direction switch makes the default re-pick
@@ -3275,10 +3281,12 @@ async function runTests(H,d){
     log("2026-10-02",5000,"ghost-id","income");
     log("2026-10-03",7000000,"seed-salary","income");      // biggest income: default on the income side
     H.renderAll(); H.showTrendsView(true);
-    assert("setup sanity: the unknown id is the default on the expense side", d.getElementById("trendsCategory").value==="ghost-id");
+    assert("setup sanity: the default is All", d.getElementById("trendsCategory").value===ALL);
+    pickCategory("ghost-id");
+    assert("setup sanity: the unknown id is now the selected category", H.getTrendsState().catId==="ghost-id");
     clickDir("income");
-    assert("direction switch re-picks even when the old selection is still offered on the other side (Salary, not the carried-over Uncategorized)",
-      d.getElementById("trendsCategory").value==="seed-salary" && H.getTrendsState().catId==="seed-salary");
+    assert("direction switch re-picks All even when the old selection is still offered on the other side (not the carried-over Uncategorized)",
+      d.getElementById("trendsCategory").value===ALL && H.getTrendsState().catId===ALL);
 
     // ---- empty states
     fresh(); H.setTrendsToday(new Date(2026,9,15));
@@ -3341,7 +3349,7 @@ async function runTests(H,d){
      Runs the real page in an offscreen frame at phone widths, with a
      seven-figure amount so the widest number is stress-tested. */
   await (async function(){
-    var WIDTHS=[320,360];
+    var WIDTHS=[320,360,390];
     for (var wi=0; wi<WIDTHS.length; wi++){
       var W=WIDTHS[wi];
       var f=document.createElement("iframe");
@@ -3384,6 +3392,228 @@ async function runTests(H,d){
         Math.abs(midRatio-(61700000/123456789))<0.02);
       var page=fd.documentElement.scrollWidth<=W;
       assert("geometry @"+W+"px: the page does not scroll horizontally", page);
+      f.remove();
+    }
+  })();
+
+
+  /* 106. (2026-10-04) Trends "All": the first and DEFAULT switcher option. It
+     is the total for the toggled direction per month (never income and
+     expense mixed), and it must equal monthTotals for every month in the
+     window, so it can never silently disagree with the Summary panel. That
+     means it includes spend under deleted categories, under ids with no
+     category record, i.e. everything the register shows as "Uncategorized".
+     It reuses the window rules (6 months, never before the earliest entry in
+     that direction, zero months explicit), the partial-month marker, and uses
+     a neutral ink fill, never a category colour and never red. */
+  await (async function(){
+    var w=d.defaultView, ALL=H.TRENDS_ALL;
+    if (typeof H.totalSeries!=="function" || typeof ALL!=="string") {
+      assert("totalSeries + TRENDS_ALL are exposed (fail-first guard)", false); return;
+    }
+    function fire(el,type){ el.dispatchEvent(new w.Event(type,{bubbles:true})); }
+    function rows(){ return [].slice.call(d.querySelectorAll("#trendsList .trendrow")); }
+    function rowByKey(k){ return d.querySelector('#trendsList .trendrow[data-key="'+k+'"]'); }
+    function numOf(k){ var r=rowByKey(k); return r?r.querySelector(".tr-num").textContent:null; }
+    function barOf(k){ var r=rowByKey(k); return r?r.querySelector(".tr-bar i"):null; }
+    function widthOf(k){ var i=barOf(k); return i?parseFloat(i.style.width):null; }
+    function toRgb(c){ var el=d.createElement("span"); el.style.backgroundColor=c; return el.style.backgroundColor; }
+    function inkRgb(){ return toRgb(w.getComputedStyle(d.documentElement).getPropertyValue("--ink").trim()); }
+    function pickCategory(id){ var s=d.getElementById("trendsCategory"); s.value=id; fire(s,"change"); }
+    function clickDir(dir){ d.querySelector('#trendsDirToggle button[data-dir="'+dir+'"]').click(); }
+    function options(){ return [].slice.call(d.querySelectorAll("#trendsCategory option")); }
+    function fresh(){ H.resetState(); H.setView(2026,9); var s=H.getState(); s.settings.currency="DKK"; H.setState(s); H.setTrendsToday(new Date(2026,9,15)); }
+    function log(date,amt,cat,dir){ return H.createEntry({date:date,amountMinor:amt,direction:dir||"expense",categoryId:cat,note:""}); }
+    function keyList(){ return rows().map(function(r){ return r.getAttribute("data-key"); }).join(","); }
+
+    // ---- pure: totalSeries
+    var mk=function(id,date,amt,cat,dir){ return {id:id,date:date,amountMinor:amt,direction:dir||"expense",categoryId:cat,note:"",
+      recurringId:null,updatedAt:"2026-10-01T00:00:00.000Z",updatedBy:"d",deleted:false,deletedAt:null}; };
+    var pe=[mk("1","2026-08-02",100,"a"),mk("2","2026-08-03",250,"b"),mk("3","2026-08-04",1,"ghost"),mk("4","2026-10-02",40,"a")];
+    var ph=H.categoryHistory(pe,"expense",2026,9,6);
+    assert("totalSeries: sums EVERY category's spend per month (a + b + an unknown id), explicit zero for an empty month",
+      H.totalSeries(ph).map(function(r){ return r.minor; }).join(",")==="351,0,40");
+    assert("totalSeries: one entry per month of the window with key, y, m",
+      H.totalSeries(ph).map(function(r){ return r.key; }).join(",")==="2026-08,2026-09,2026-10" && H.totalSeries(ph)[0].y===2026 && H.totalSeries(ph)[0].m===7);
+    assert("totalSeries: an empty history gives no months", H.totalSeries(H.categoryHistory([],"expense",2026,9,6)).length===0);
+    assert("totalSeries is integer-exact (three 19.99 entries are exactly 5997)",
+      H.totalSeries(H.categoryHistory([mk("i1","2026-10-01",1999,"a"),mk("i2","2026-10-02",1999,"a"),mk("i3","2026-10-03",1999,"b")],"expense",2026,9,6))[0].minor===5997);
+
+    // ---- the scenario
+    fresh();
+    log("2026-03-10",999900,"seed-groceries");           // before the window
+    log("2026-05-03",200050,"seed-groceries");
+    log("2026-07-20",405075,"seed-groceries");
+    log("2026-07-05",11111,"ghost-id");                  // unknown category id
+    log("2026-08-11",100000,"seed-groceries");
+    log("2026-08-12",70000,"seed-health");               // deleted below (shows as Uncategorized in the register)
+    log("2026-09-30",300000,"seed-groceries");
+    log("2026-10-02",150025,"seed-groceries");
+    log("2026-10-03",50000,"seed-dining");
+    log("2026-03-05",12300,"seed-utilities");            // deleted below, before the window
+    log("2026-09-25",2500000,"seed-salary","income");
+    log("2026-09-26",3333,"ghost-id","income");
+    log("2026-10-01",100000,"seed-freelance","income");
+    H.deleteCategory("seed-health"); H.deleteCategory("seed-utilities");
+    H.renderAll(); H.showTrendsView(true);
+
+    assert("default: All is selected on opening, both in the control and in the stored view-state",
+      d.getElementById("trendsCategory").value===ALL && H.getTrendsState().catId===ALL);
+    assert("switcher: All is the FIRST option, labelled 'All'", options()[0].value===ALL && options()[0].textContent==="All");
+    assert("switcher: the categories follow it (Groceries is offered after All)",
+      options().length>2 && options().slice(1).some(function(o){ return o.textContent==="Groceries"; }));
+    assert("All: rows are the standard 6-month window May..Oct, oldest first", keyList()==="2026-05,2026-06,2026-07,2026-08,2026-09,2026-10");
+
+    var expected={"2026-05":200050,"2026-06":0,"2026-07":416186,"2026-08":170000,"2026-09":300000,"2026-10":200025};
+    Object.keys(expected).forEach(function(k){
+      assert("All "+k+": exact formatMoney of the month total (deleted-category and unknown-id spend included)",
+        numOf(k)===H.formatMoney(expected[k],"DKK"));
+    });
+    assert("All includes a DELETED category's spend: August is Groceries 100000 + deleted Health 70000, not Groceries alone",
+      numOf("2026-08")===H.formatMoney(170000,"DKK") && numOf("2026-08")!==H.formatMoney(100000,"DKK"));
+    assert("All includes an UNKNOWN-id entry's spend: July is Groceries 405075 + 11111, not Groceries alone",
+      numOf("2026-07")===H.formatMoney(416186,"DKK") && numOf("2026-07")!==H.formatMoney(405075,"DKK"));
+    assert("All excludes spend that falls outside the window (the March entries)",
+      rows().length===6 && !rowByKey("2026-03"));
+
+    // ---- the cross-check against monthTotals, every month, both directions, against the real DOM
+    ["expense","income"].forEach(function(dir){
+      if (dir==="income") clickDir("income"); else clickDir("expense");
+      var all=rows().length>0 && rows().every(function(r){
+        var parts=r.getAttribute("data-key").split("-"), y=+parts[0], m=+parts[1]-1;
+        var mt=H.monthTotals(H.entriesInMonth(y,m));
+        return r.querySelector(".tr-num").textContent===H.formatMoney(dir==="expense"?mt.expenses:mt.income,"DKK");
+      });
+      assert("cross-check ("+dir+"): EVERY displayed month in All equals monthTotals() for that month (so it agrees with the Summary panel)", all);
+      var hist=H.categoryHistory(H.getState().entries,dir,2026,9,6);
+      assert("cross-check ("+dir+"): totalSeries equals monthTotals() for every month in the window",
+        H.totalSeries(hist).every(function(r){ var mt=H.monthTotals(H.entriesInMonth(r.y,r.m)); return r.minor===(dir==="expense"?mt.expenses:mt.income); }));
+    });
+    clickDir("expense");
+
+    // ---- partial marker, scale and colour in All
+    var cur=rowByKey("2026-10");
+    assert("All: the current month says 'so far' and is marked partial", /so far/i.test(cur.textContent) && cur.classList.contains("partial"));
+    assert("All: its bar is hatched (partial) with an honest width",
+      !!barOf("2026-10") && barOf("2026-10").classList.contains("partial") && Math.abs(widthOf("2026-10")-(200025/416186*100))<0.01);
+    assert("All: no earlier month is marked partial",
+      rows().slice(0,5).every(function(r){ return !/so far/i.test(r.textContent) && !r.classList.contains("partial"); }));
+    assert("All: bars scale to the largest month total (July = 100%), a zero month has no bar",
+      Math.abs(widthOf("2026-07")-100)<0.01 && barOf("2026-06")===null && Math.abs(widthOf("2026-05")-(200050/416186*100))<0.01);
+    var gro=H.catById("seed-groceries");
+    assert("All: bars use the neutral ink colour, not a category colour",
+      ["2026-05","2026-07","2026-08","2026-09","2026-10"].every(function(k){ var i=barOf(k); return !!i && w.getComputedStyle(i).backgroundColor===inkRgb(); })
+      && inkRgb()!==toRgb(gro.color));
+    assert("All: no red anywhere (no 'over' class, never the warning colour)",
+      rows().every(function(r){ var i=r.querySelector(".tr-bar i"); return !i || (!i.classList.contains("over") && i.style.backgroundColor!==toRgb("#B23A2F")); }));
+    pickCategory("seed-groceries");
+    assert("a single category still draws in its own colour (All's neutral ink does not leak)",
+      !!barOf("2026-07") && barOf("2026-07").style.backgroundColor===toRgb(gro.color));
+    pickCategory(ALL);
+    assert("choosing All again from the switcher works and restores the total", numOf("2026-08")===H.formatMoney(170000,"DKK") && H.getTrendsState().catId===ALL);
+
+    // ---- All follows the toggle, never mixing directions
+    clickDir("income");
+    assert("toggle to Income keeps All selected", d.getElementById("trendsCategory").value===ALL && H.getTrendsState().catId===ALL);
+    assert("All (Income): window starts at the first INCOME entry (Sep, Oct)", keyList()==="2026-09,2026-10");
+    assert("All (Income): total income only, including the unknown-id income entry (2,500,000 + 3,333)",
+      numOf("2026-09")===H.formatMoney(2503333,"DKK") && numOf("2026-10")===H.formatMoney(100000,"DKK"));
+    assert("All (Income) never includes expense spend (no 170000 / 416186 figures anywhere)",
+      rows().every(function(r){ var n=r.querySelector(".tr-num").textContent; return n!==H.formatMoney(170000,"DKK") && n!==H.formatMoney(416186,"DKK"); }));
+    assert("All (Income): the current month is marked partial too", /so far/i.test(rowByKey("2026-10").textContent));
+    assert("the switcher on the Income side lists All first, then income categories only",
+      options()[0].value===ALL && options().every(function(o){ return o.textContent!=="Groceries"; }));
+    clickDir("expense");
+    assert("toggle back to Spent keeps All selected and shows total expenses again",
+      d.getElementById("trendsCategory").value===ALL && numOf("2026-08")===H.formatMoney(170000,"DKK"));
+
+    // ---- single category selected, then direction switch -> All
+    pickCategory("seed-dining");
+    clickDir("income");
+    assert("a single category selected, then a direction switch: re-picks All (not the biggest income category)",
+      d.getElementById("trendsCategory").value===ALL && H.getTrendsState().catId===ALL);
+    clickDir("expense");
+
+    // ---- deleted ENTRIES are not in All (same rule as monthTotals)
+    var victim=log("2026-10-04",777,"seed-dining"); H.renderAll();
+    var withIt=numOf("2026-10");
+    H.deleteEntry(victim.id); H.renderAll();
+    assert("a deleted entry stops counting in All (and still equals monthTotals)",
+      withIt===H.formatMoney(200025+777,"DKK") && numOf("2026-10")===H.formatMoney(200025,"DKK") &&
+      numOf("2026-10")===H.formatMoney(H.monthTotals(H.entriesInMonth(2026,9)).expenses,"DKK"));
+
+    // ---- All keeps its selection across a re-render and a newly logged entry
+    log("2026-10-06",1000,"seed-groceries"); H.renderAll();
+    assert("All stays selected after a new entry is logged, and the total moves",
+      H.getTrendsState().catId===ALL && numOf("2026-10")===H.formatMoney(201025,"DKK"));
+
+    // ---- window rules in All
+    fresh();
+    for (var i=0;i<10;i++){ log("2026-"+String(i+1).padStart(2,"0")+"-10",1000,"seed-groceries"); }
+    H.renderAll(); H.showTrendsView(true);
+    assert("All: capped at 6 months even with 10 months of data", rows().length===6 && keyList()==="2026-05,2026-06,2026-07,2026-08,2026-09,2026-10");
+    fresh(); log("2026-08-05",1000,"seed-groceries"); log("2026-10-05",3000,"seed-dining"); H.renderAll(); H.showTrendsView(true);
+    assert("All: never earlier than the earliest entry in that direction (3 rows: Aug, Sep, Oct)", keyList()==="2026-08,2026-09,2026-10");
+    assert("All: the month with no entries is an explicit exact 0 with no bar", numOf("2026-09")===H.formatMoney(0,"DKK") && barOf("2026-09")===null);
+    assert("All: a zero month in the middle does not change the others (Aug 1000, Oct 3000)",
+      numOf("2026-08")===H.formatMoney(1000,"DKK") && numOf("2026-10")===H.formatMoney(3000,"DKK"));
+
+    // ---- empty direction under All
+    fresh(); log("2026-09-02",1000,"seed-groceries"); H.renderAll(); H.showTrendsView(true);
+    clickDir("income");
+    assert("All with an empty direction: the existing plain empty state, no rows, no chart",
+      /No income logged yet/i.test(d.getElementById("trendsList").textContent) && rows().length===0 && d.querySelectorAll("#trendsList .tr-bar").length===0);
+    assert("All with an empty direction: the switcher is disabled", d.getElementById("trendsCategory").disabled===true);
+    clickDir("expense");
+    assert("leaving the empty direction: All is still the selection and the rows are back",
+      d.getElementById("trendsCategory").value===ALL && rows().length===2);
+    fresh(); H.showTrendsView(true); H.renderAll();
+    assert("a brand-new ledger: the plain empty state, no All chart", /No expenses logged yet/i.test(d.getElementById("trendsList").textContent) && rows().length===0);
+
+    H.resetState();
+  })();
+
+  /* 107. (2026-10-04) Desktop cap on the bar track. At 1280px the track
+     stretched to ~989px (about 1600px on a larger screen) and a bar that long
+     is hard to read against a figure at the far edge. The list is capped, so
+     the track stops growing; the phone layout is untouched because a
+     max-width only bites when the screen is wider than the cap. The phone
+     track widths (60.8 / 100.8 / 130.8px at 320 / 360 / 390 in this exact
+     scenario, measured before the change) are pinned to the same values so
+     "phone layout unchanged" is a test, not a claim. */
+  await (async function(){
+    var CASES=[[320,60.8],[360,100.8],[390,130.8],[1000,null],[1280,null]];
+    for (var ci=0; ci<CASES.length; ci++){
+      var W=CASES[ci][0], expectTrack=CASES[ci][1];
+      var f=document.createElement("iframe");
+      f.style.cssText="display:block;position:absolute;left:-9999px;top:0;width:"+W+"px;height:900px;border:0;visibility:hidden";
+      document.body.appendChild(f);
+      await new Promise(function(r){ f.onload=r; f.src="index.html?mltest=1&cb="+Date.now(); });
+      var fw=f.contentWindow, fd=f.contentDocument, FH=fw.__ML_TEST__;
+      try{ await fd.fonts.ready; }catch(e){}
+      FH.resetState(); FH.setTrendsToday(new Date(2026,9,15));
+      var st=FH.getState(); st.settings.currency="DKK"; FH.setState(st);
+      FH.createEntry({date:"2026-05-03",amountMinor:99900,direction:"expense",categoryId:"seed-groceries",note:""});
+      FH.createEntry({date:"2026-06-03",amountMinor:123456789,direction:"expense",categoryId:"seed-groceries",note:""});
+      FH.createEntry({date:"2026-07-03",amountMinor:61700000,direction:"expense",categoryId:"seed-groceries",note:""});
+      FH.createEntry({date:"2026-10-03",amountMinor:5000,direction:"expense",categoryId:"seed-groceries",note:""});
+      FH.renderAll(); FH.showTrendsView(true);
+      await new Promise(function(r){ setTimeout(r,250); });
+      var tr=[].slice.call(fd.querySelectorAll("#trendsList .tr-bar")).map(function(x){ return x.getBoundingClientRect().width; });
+      assert("cap @"+W+"px: setup sanity: the frame has layout and 6 tracks rendered", tr.length===6 && tr.every(function(x){ return x>0; }));
+      var spread=Math.max.apply(null,tr)-Math.min.apply(null,tr);
+      if (expectTrack!==null){
+        assert("cap @"+W+"px: phone layout unchanged: the track is still "+expectTrack+"px (+-0.5), same as before the cap"+
+          (Math.abs(tr[0]-expectTrack)<=0.5?"":" [now "+tr[0].toFixed(1)+"]"), Math.abs(tr[0]-expectTrack)<=0.5 && spread<=0.5);
+      } else {
+        assert("cap @"+W+"px: desktop bar track is capped at 520px or less"+(Math.max.apply(null,tr)<=520?"":" [now "+Math.max.apply(null,tr).toFixed(1)+"]"),
+          Math.max.apply(null,tr)<=520);
+        assert("cap @"+W+"px: desktop tracks are still all the same length", spread<=0.5);
+        assert("cap @"+W+"px: the capped track is still generous (over 300px)", Math.min.apply(null,tr)>300);
+        var list=fd.getElementById("trendsList").getBoundingClientRect();
+        var overflow=[].slice.call(fd.querySelectorAll("#trendsList .tr-num")).some(function(n){ return n.scrollWidth>n.clientWidth+0.5 || n.getBoundingClientRect().right>list.right+0.5; });
+        assert("cap @"+W+"px: the figures are not clipped or pushed out of the list", !overflow);
+      }
       f.remove();
     }
   })();
