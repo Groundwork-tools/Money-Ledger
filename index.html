@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Money Ledger</title>
-<link rel="stylesheet" href="style.css?v=20261004a">
+<link rel="stylesheet" href="style.css?v=20261004b">
 </head>
 <body>
 
@@ -178,6 +178,33 @@
     <div id="recurringFilter" class="catfilter" hidden></div>
     <div id="recurringList" class="register"></div>
     <div class="hint">Auto-inserted as a real entry into the register on its day each month — editing or deleting a recurring item never changes entries already logged from it.</div>
+  </section>
+
+  <section class="trendsview" id="trendsView" hidden>
+    <div class="panel-label">
+      <span>Trends</span>
+      <button type="button" id="trendsBack" class="ghost">← Back to register</button>
+    </div>
+
+    <section class="quickadd">
+      <div class="quickadd-row">
+        <div class="qa-field qa-type">
+          <label>Type</label>
+          <div class="dirtoggle" id="trendsDirToggle">
+            <button type="button" data-dir="expense" aria-pressed="true">Spent</button>
+            <button type="button" data-dir="income" aria-pressed="false">Income</button>
+          </div>
+        </div>
+        <div class="qa-field qa-cat">
+          <label for="trendsCategory">Category</label>
+          <select id="trendsCategory"></select>
+        </div>
+      </div>
+    </section>
+
+    <div class="panel-label trends-items-label"><span>Month by month</span></div>
+    <div id="trendsList" class="register trends-list"></div>
+    <div class="hint">Up to the last 6 months, ending this month and never starting before your first entry. The current month is still in progress, so a shorter bar there is not a drop.</div>
   </section>
 
   <div class="cols" id="mainCols">
@@ -354,6 +381,6 @@
 </div>
 
 <script src="https://accounts.google.com/gsi/client"></script>
-<script src="app.js?v=20261004a"></script>
+<script src="app.js?v=20261004b"></script>
 </body>
 </html>

@@ -190,6 +190,29 @@ button{cursor:pointer}
    quick-add down to the register box */
 .recurring-items-label{margin-top:26px}
 
+/* trends, backlog #4. The category switcher reuses .quickadd/.qa-field so it
+   reads as the same family as quick-add and the Recurring add form; the list
+   reuses .register's frame. Bars are plain CSS, square, in the category's own
+   colour (set inline) and never red: red on this app means over-budget. */
+.trendsview{margin-top:18px}
+.trends-items-label{margin-top:26px}
+/* ONE shared number-column width for the whole list (--tr-numw, set in JS from
+   the longest figure, in ch of this row's own mono font). An `auto` column let
+   a short figure leave a longer bar track than a long one, so bars scaled to
+   the same maximum were drawn on tracks of different lengths and could not be
+   compared across rows. */
+.trendrow{display:grid;grid-template-columns:76px 1fr var(--tr-numw,12ch);align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid var(--rule-soft);font-family:var(--mono);font-size:13px}
+.trendrow:last-child{border-bottom:0}
+.tr-month{font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;line-height:1.3}
+/* the in-progress month: a second line under the label, because beside it
+   would not fit at phone width next to the bar and the exact number */
+.tr-month em{display:block;font-style:normal;font-size:9px;letter-spacing:.1em;color:var(--muted)}
+.tr-bar{display:block;height:14px;background:var(--rule-soft)}
+.tr-bar i{display:block;height:100%;min-width:2px}
+/* hatched = not finished yet. Width stays honest; only the fill says "so far" */
+.tr-bar i.partial{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.6) 0 3px,transparent 3px 6px)}
+.tr-num{font-weight:600;text-align:right;white-space:nowrap}
+
 /* register — chronological list, grouped by week with subtotals */
 .register{border:1px solid var(--ink)}
 .weekhead{display:flex;justify-content:space-between;align-items:baseline;background:var(--stripe);padding:8px 12px;border-bottom:1px solid var(--ink);font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
@@ -335,6 +358,9 @@ button{cursor:pointer}
      was clipped at 320px. */
   .screennav{display:flex;flex:1 0 100%;gap:8px}
   .screennav .ghost{flex:1 1 0;min-width:0;padding:8px 4px;letter-spacing:.06em}
+  /* Trends rows: leave the bar room beside a long figure on a 320-390px screen */
+  .trendrow{grid-template-columns:62px 1fr var(--tr-numw,12ch);gap:8px;padding:9px 10px;font-size:12px}
+  .tr-month{font-size:10px;letter-spacing:.04em}
   .quickadd-row{flex-direction:column;align-items:stretch}
   .qa-amount,.qa-date,.qa-cat{width:100%}
   .tools .ghost{min-width:0}

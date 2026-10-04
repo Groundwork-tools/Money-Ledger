@@ -2362,6 +2362,7 @@ function initFab() {
     // instead of silently failing to scroll/focus a hidden element.
     showBudgetView(false);
     showRecurringView(false);
+    showTrendsView(false);
     document.getElementById("quickadd").scrollIntoView({ behavior: "smooth", block: "start" });
     document.getElementById("qaAmount").focus();
   });
@@ -2375,6 +2376,7 @@ function initHomeLink() {
   document.getElementById("homeLink").addEventListener("click", () => {
     showBudgetView(false);
     showRecurringView(false);
+    showTrendsView(false);
   });
 }
 
@@ -2511,7 +2513,10 @@ function showBudgetView(show) {
   document.getElementById("budgetView").hidden = !show;
   document.getElementById("quickadd").hidden = show;
   document.getElementById("mainCols").hidden = show;
-  if (show) document.getElementById("recurringView").hidden = true;
+  if (show) {
+    document.getElementById("recurringView").hidden = true;
+    document.getElementById("trendsView").hidden = true;
+  }
 }
 
 function setBudgetRingColor(key, hue, hex) {
@@ -2808,7 +2813,10 @@ function showRecurringView(show) {
   document.getElementById("recurringView").hidden = !show;
   document.getElementById("quickadd").hidden = show;
   document.getElementById("mainCols").hidden = show;
-  if (show) document.getElementById("budgetView").hidden = true;
+  if (show) {
+    document.getElementById("budgetView").hidden = true;
+    document.getElementById("trendsView").hidden = true;
+  }
 }
 
 function initRecurringView() {
@@ -2843,6 +2851,109 @@ function initRecurringView() {
   });
 }
 
+// ---------- Trends screen (backlog #4) ----------
+//
+// View-state only (same discipline as viewDir/recurringDir and the category
+// filters): never in State, localStorage or sync, reset on reload. The data
+// comes from categoryHistory/categorySeries/historyCategoryOptions above.
+let trendsDir = "expense";
+let trendsCatId = null;
+// Test seam: "today" decides which month is the in-progress one. Null in
+// real use (the real clock); the self-test pins it so it never depends on
+// which month the suite happens to run in.
+let trendsTodayOverride = null;
+function trendsToday() { return trendsTodayOverride || new Date(); }
+
+// Default selection: the option with the most spend in the window (first
+// wins a tie, so the switcher order stays predictable). A selection that is
+// still offered is kept; a stale one (direction changed, category gone)
+// falls back to the default. No options -> null.
+function pickTrendsCategory(options, current) {
+  if (current && options.some((o) => o.id === current)) return current;
+  let best = null;
+  options.forEach((o) => { if (best === null || o.total > best.total) best = o; });
+  return best ? best.id : null;
+}
+
+function shortMonthLabel(y, m) {
+  return new Date(y, m, 1).toLocaleDateString(undefined, { month: "short", year: "numeric" }).toUpperCase();
+}
+
+function showTrendsView(show) {
+  document.getElementById("trendsView").hidden = !show;
+  document.getElementById("quickadd").hidden = show;
+  document.getElementById("mainCols").hidden = show;
+  if (show) {
+    document.getElementById("budgetView").hidden = true;
+    document.getElementById("recurringView").hidden = true;
+  }
+}
+
+function renderTrendsView() {
+  const currency = state.settings.currency;
+  document.querySelectorAll("#trendsDirToggle button").forEach((b) => {
+    b.setAttribute("aria-pressed", String(b.dataset.dir === trendsDir));
+  });
+  const today = trendsToday();
+  const endY = today.getFullYear(), endM = today.getMonth();
+  const history = categoryHistory(state.entries, trendsDir, endY, endM, HISTORY_MONTHS);
+  const sel = document.getElementById("trendsCategory");
+  const list = document.getElementById("trendsList");
+
+  if (history.months.length === 0) {
+    sel.innerHTML = '<option value="">-</option>';
+    sel.disabled = true;
+    list.innerHTML = `<div class="register-empty">No ${trendsDir === "income" ? "income" : "expenses"} logged yet.<br>History appears here once you have some entries.</div>`;
+    return;
+  }
+
+  const options = historyCategoryOptions(state.categories, history);
+  trendsCatId = pickTrendsCategory(options, trendsCatId);
+  sel.disabled = false;
+  sel.innerHTML = options.map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.label)}</option>`).join("");
+  sel.value = trendsCatId;
+
+  const series = categorySeries(history, trendsCatId);
+  const max = series.reduce((mx, r) => Math.max(mx, r.minor), 0);
+  // find() on state.categories, not catById(): a deleted category's tombstone
+  // still carries its colour, and its history must keep drawing in it.
+  const cat = state.categories.find((c) => c.id === trendsCatId);
+  const color = cat ? cat.color : "var(--muted)";
+  const nowKey = monthKey(endY, endM);
+  // Shared figure-column width: the longest exact label, plus half a character
+  // of slack. Every row uses it, so every bar track is the same length.
+  const numChars = series.reduce((mx, r) => Math.max(mx, formatMoney(r.minor, currency).length), 0);
+  list.style.setProperty("--tr-numw", (numChars + 0.5) + "ch");
+  list.innerHTML = series.map((r) => {
+    // The window always ends at the real current month, so that row is the
+    // one still in progress. Marked with text ("so far") AND a hatched bar;
+    // the bar's width stays honest, only its fill says "not finished".
+    const partial = r.key === nowKey;
+    const pct = max > 0 ? (r.minor / max) * 100 : 0;
+    const bar = r.minor > 0
+      ? `<i class="${partial ? "partial" : ""}" style="width:${pct.toFixed(2)}%;background-color:${color}"></i>`
+      : "";
+    return `<div class="trendrow${partial ? " partial" : ""}" data-key="${r.key}">` +
+      `<span class="tr-month">${shortMonthLabel(r.y, r.m)}${partial ? "<em>so far</em>" : ""}</span>` +
+      `<span class="tr-bar">${bar}</span>` +
+      `<b class="tr-num">${formatMoney(r.minor, currency)}</b></div>`;
+  }).join("");
+}
+
+function initTrendsView() {
+  document.getElementById("trendsToggle").addEventListener("click", () => showTrendsView(true));
+  document.getElementById("trendsBack").addEventListener("click", () => showTrendsView(false));
+  document.querySelectorAll("#trendsDirToggle button").forEach((b) => {
+    // Expense and income categories are disjoint, so the old selection could
+    // only ever be stale: clear it and let the default re-pick.
+    b.addEventListener("click", () => { trendsDir = b.dataset.dir; trendsCatId = null; renderTrendsView(); });
+  });
+  document.getElementById("trendsCategory").addEventListener("change", (e) => {
+    trendsCatId = e.target.value;
+    renderTrendsView();
+  });
+}
+
 function renderAll() {
   if (!state.settings.currency) return;
   document.getElementById("monthLabel").textContent = monthLabel(viewYear, viewMonth);
@@ -2852,6 +2963,7 @@ function renderAll() {
   renderSettings();
   renderBudgetView();
   renderRecurringView();
+  renderTrendsView();
   refreshQuickAddCategories();
 }
 
@@ -2883,6 +2995,9 @@ function exposeTestHook() {
       lastOAuthWindow = null;
       registerCatFilter.clear();
       recurringCatFilter.clear();
+      trendsDir = "expense";
+      trendsCatId = null;
+      trendsTodayOverride = null;
       renderAll();
     },
     saveState,
@@ -2965,6 +3080,9 @@ function exposeTestHook() {
 
     formatMoney, formatCompact, parseAmountToMinor, monthTotals, sumByCategory,
     categoryHistory, categorySeries, historyCategoryOptions, HISTORY_MONTHS,
+    showTrendsView, pickTrendsCategory,
+    setTrendsToday: (date) => { trendsTodayOverride = date; },
+    getTrendsState: () => ({ dir: trendsDir, catId: trendsCatId }),
     getViewDir: () => viewDir,
     setViewDir: (dir) => { viewDir = dir; registerCatFilter.clear(); renderAll(); },
 
@@ -3003,6 +3121,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initSettings();
   initBudgetView();
   initRecurringView();
+  initTrendsView();
   initEditRecurringSheet();
   initFab();
   initHomeLink();

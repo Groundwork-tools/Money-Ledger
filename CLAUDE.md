@@ -1253,7 +1253,7 @@ Diagnosed rather than assumed:
 - **Cache-busting.** `index.html` loads `style.css?v=TOKEN` and
   `app.js?v=TOKEN` so a phone cannot serve a stale cached script beside a
   fresh page (the 2026-08-12 gotcha). TOKEN is a hand-bumped string (current:
-  `20261004a`), not a commit hash, because a commit cannot contain its own
+  `20261004b`), not a commit hash, because a commit cannot contain its own
   hash and there is no build step to inject one. **On every deploy that
   changes `app.js` or `style.css`, change TOKEN in BOTH tags** (date plus a
   letter, e.g. `20261015a`). A self-test fails if the two tokens differ or
@@ -1300,6 +1300,66 @@ word, not independently verified from here).**
   a wrong-tab cause if that is what happened. Reopen only if the wrong
   landing recurs, and capture first whether the page reloaded (the Income /
   previous-month check above) before building anything.
+
+## General fixes (2026-10-04, Trends)
+
+**Trends screen built (backlog #4).** Third header button, own screen, per
+the decisions recorded under backlog #4. View-state only (`trendsDir`,
+`trendsCatId`, never in State, storage or sync). Data layer is pure
+(`categoryHistory`, `categorySeries`, `historyCategoryOptions`), built on the
+existing `sumByCategory` and cross-checked against it, `monthTotals` and
+`entriesInMonth` in the self-test.
+
+- **Header.** Budget, Recurring and Trends sit in a `.screennav` wrapper:
+  `display:contents` on desktop (button geometry measured identical to
+  before), own full-width row of three equal buttons below 700px. Measured at
+  320/360/390/1000/1280px: with default `.ghost` padding "Recurring" overran
+  its content box at 360px (text 78.9px, box 75px) and was clipped at 320px,
+  so the buttons get `padding:8px 4px; letter-spacing:.06em` inside the 700px
+  block only (slack at 360px: 18px). Labels unchanged, no icons.
+- **How the current month is marked as partial, and why.** The window always
+  ends at the real current month, so the last row is the in-progress one. It
+  carries the text "so far" on a second line under the month label, plus a
+  hatched (striped) bar fill. Text, because it is unambiguous and testable;
+  stacked under the label rather than beside it, because beside it does not
+  fit next to the bar and an exact figure at 390px; hatching as a second cue
+  that works at a glance. The bar width stays honest (scaled to the largest
+  month like every other row), only the fill says "not finished". A one-line
+  hint under the list says the same in words. The marker follows the real
+  clock, not the month being viewed elsewhere in the app.
+- **Bug found by a screenshot, not by the DOM tests.** The figure column was
+  `auto`, so a short figure ("999 kr.") left a longer bar track than a long
+  one ("3.050,25 kr."): bars were scaled to the same maximum but drawn on
+  tracks of different lengths, so lengths could not be compared across rows.
+  Fixed with one shared figure-column width for the list (`--tr-numw`, the
+  longest exact label in `ch`, set from JS), tighter month column and figure
+  size under 700px. Pinned by a geometry test (block 105) that runs the real
+  page in an offscreen frame at 320 and 360px with a seven-figure amount.
+  Lesson: DOM and class checks cannot see layout; the main sandbox frame has
+  no layout at all (`iframe{display:none}`), so layout checks need their own
+  offscreen frame (and must force `display:block`, or every size is 0 and the
+  checks pass vacuously, which happened once while writing block 102).
+- **Exact numbers, no red, square bars.** Figures use `formatMoney` (exact),
+  never `formatCompact`. Bars use the category's own colour, a deleted
+  category's tombstone colour included. Zero months show an exact 0 and no
+  bar at all. A selected category with no spend shows six zero rows.
+- **Default selection** is the category with the most spend in the window
+  (first wins a tie); a direction switch clears the selection so it re-picks.
+  Deleted categories appear only with spend in the window, as "Name (deleted)".
+- **Navigation.** The logo, the FAB and Back all return to the register;
+  opening Budget or Recurring from Trends (the header is visible on every
+  screen) hides Trends, and vice versa, so two screens are never open at once.
+- **Verification.** Blocks 102 to 105. Fail-first runs: 3 failing, then 0.
+  Eleven single-behavior mutants of the Trends code each flip tests; three
+  needed test work first (one crashed the suite instead of failing cleanly,
+  one exposed that the "clear selection on direction switch" line is only
+  observable for an unknown category id that has spend in both directions,
+  one showed nothing checked a deleted category's bar colour). Pure-layer
+  mutants: eight of nine flip; the ninth (the `<= endKey` future filter) is an
+  equivalent mutant, because a future-only ledger already yields a negative
+  month count. Screenshots at 390px and 1280px checked by eye in headless
+  Chrome. **Not real-device-verified.** Desktop note: at 1280px the bars
+  stretch very wide (about 1600px); left as is, not requested.
 
 ## Testing before you claim it works
 
@@ -1779,8 +1839,8 @@ ledger-paper plainness *is* the trust signal.
    per category across previous months, with numbers, and a graph that can
    switch between categories (e.g. groceries over the last 6 months). Plain
    SVG or CSS, no chart library, must respect the design constraints
-   (ledger paper, square corners, mono numbers). **Status: design decided
-   (below), not built.** Any total-by-category-by-month function must be
+   (ledger paper, square corners, mono numbers). **Status: built
+   (2026-10-04), see "General fixes (2026-10-04, Trends)"; design below.** Any total-by-category-by-month function must be
    checked against the existing `sumByCategory`/`monthTotals` first, and
    ships with tests in the same commit (hard rule 10). View-state only: no
    schema, storage or sync change.
