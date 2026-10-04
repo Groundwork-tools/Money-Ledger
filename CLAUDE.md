@@ -1268,6 +1268,39 @@ Diagnosed rather than assumed:
   (a stub keyed on the wrong storage key; a toast element that keeps stale
   text). **Not real-device-verified.**
 
+**Real-device results for 2026-10-04 (reported by Sebastian, recorded on his
+word, not independently verified from here).**
+- **Quota error: not reproduced after `58819b6` deployed. Cause
+  unconfirmed. NOT marked fixed.** The error did not recur on the phone with
+  the new code live, but it was intermittent before, so one clean run proves
+  little. The "full localStorage" explanation above remains a leading
+  hypothesis only: nothing observed on the device has confirmed or refuted
+  it. If it recurs, the toast now names the cause (storage full with the
+  biggest key sizes, or a Drive reason), which is the evidence to act on.
+- **Session expiry: not yet verified on a real device.** The 401 / expired
+  token handling, the "session expired" toast and the tap-anywhere reconnect
+  that follows it have only been exercised by the self-test suite (fake
+  Drive) and mutation checks. Needs an hour-idle tab on the phone.
+- **Post-login landing on the wrong screen (investigated, no code).**
+  Hypothesis was that the page reloads during the OAuth round trip (for
+  example a discarded background tab on mobile) and in-memory view state
+  (screen, month, Spent/Income) resets. Mechanism check: in headless Chrome a
+  reload does reset all three (Recurring to register, September to October,
+  Income to Spent), and nothing else in the connect path changes screens.
+  Phone test: with Income selected and the previous month showing, Sebastian
+  tapped Connect and completed the picker. Income and the previous month
+  survived, and no extra tab opened. So the page did not reload on that
+  run, and the reload theory is not supported by it. The original
+  intermittent report was **not reproduced** and its cause is unknown.
+  A one-off clean run does not rule out an intermittent cause.
+  **Decision: the proposed `sessionStorage` "restore pre-connect view" fix
+  is deliberately NOT built.** Reasoning: no observed failure to fix, it
+  would add persisted view state to an app that deliberately resets view
+  state on load (`viewDir`, the category filters), and it would not address
+  a wrong-tab cause if that is what happened. Reopen only if the wrong
+  landing recurs, and capture first whether the page reloaded (the Income /
+  previous-month check above) before building anything.
+
 ## Testing before you claim it works
 
 There is an automated self-test suite — `money-ledger-selftest.html`,
@@ -1741,6 +1774,45 @@ ledger-paper plainness *is* the trust signal.
    paused and a future-dated item both marked inactive in the list with
    the summary/day totals correctly excluding them. Not yet
    real-device-verified by Sebastian.
+
+4. **Per-category spending history (2026-10-04).** See how much was spent
+   per category across previous months, with numbers, and a graph that can
+   switch between categories (e.g. groceries over the last 6 months). Plain
+   SVG or CSS, no chart library, must respect the design constraints
+   (ledger paper, square corners, mono numbers). **Status: design decided
+   (below), not built.** Any total-by-category-by-month function must be
+   checked against the existing `sumByCategory`/`monthTotals` first, and
+   ships with tests in the same commit (hard rule 10). View-state only: no
+   schema, storage or sync change.
+
+   **Design decisions (Sebastian, 2026-10-04, final):**
+   - **Its own screen, not a section of Budget.** Budget is about limits
+     (what you plan to spend) and history is about the past (what you
+     did). Mixing them would break the one-job-per-surface rule already
+     used for the Budget screen and the category rail.
+   - **Window: fixed 6 months ending at the current real-world month, and
+     never starting before the earliest entry in that direction. No
+     selector.** The window cannot usefully exceed the data that exists
+     (the real ledger only goes back to when sync work began in August), so
+     a longer or selectable range would mostly render empty months. A
+     selector is more UI for no current benefit. Months with no spend
+     inside the window still render as an explicit zero, not omitted.
+   - **Layout: a category switcher on top, then one row per month for the
+     selected category (month, bar, number).** Not a category-by-month
+     grid: five or more mono number columns do not fit at 390px, and one
+     category at a time reads cleanly on a phone and matches the
+     one-row-per-item rhythm of the register.
+   - **A deleted category with past spend in the window is shown as
+     "Name (deleted)".** The tombstone keeps the name, so history stays
+     truthful. Folding it into "Uncategorized" (what the register does for
+     live entries) would hide where past money actually went.
+   - Expense and income stay separate, using the same Spent/Income toggle
+     as the rest of the app.
+
+   **Cut, deliberately:** tooltips; gridlines and axis ticks; a budget
+   overlay line (`budgetMinor` is today's value, not a per-month value, so
+   an overlay would misstate past months); multi-category comparison; a
+   year view; a window selector.
 
 Do not add features that are not on this list without discussing them first.
 
