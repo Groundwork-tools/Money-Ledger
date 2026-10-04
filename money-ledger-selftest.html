@@ -2931,6 +2931,197 @@ async function runTests(H,d){
     assert("index.html: both ?v= tokens match", !!css && !!js && css[1]===js[1]);
   })();
 
+
+  /* 102. (2026-10-04) Header screen buttons (Budget, Recurring, Trends) must
+     fit their row on a narrow phone. Measured, not assumed: at 360px the
+     Recurring label's text was 3.9px wider than its button's content box
+     (it overran its own padding, and at 320px it was outright clipped), so
+     a third button would have made the row cramped. The check compares each
+     label's real text width to the button's content width, because
+     scrollWidth counts padding and so cannot see this overrun. Runs the
+     real index.html in its own offscreen iframe at the target width (the
+     main sandbox iframe is display:none and has no layout). Depends on the
+     web fonts having loaded (it waits for document.fonts.ready); a fully
+     offline run would measure fallback fonts. */
+  await (async function(){
+    var WIDTHS=[320,360];
+    for (var wi=0; wi<WIDTHS.length; wi++){
+      var W=WIDTHS[wi];
+      var f=document.createElement("iframe");
+      f.style.cssText="display:block;position:absolute;left:-9999px;top:0;width:"+W+"px;height:800px;border:0;visibility:hidden"; // display:block overrides this page's own iframe{display:none}, which would leave the frame with no layout at all
+      document.body.appendChild(f);
+      await new Promise(function(r){ f.onload=r; f.src="index.html?mltest=1&cb="+Date.now(); });
+      var fd=f.contentDocument;
+      try{ await fd.fonts.ready; }catch(e){}
+      await new Promise(function(r){ setTimeout(r,250); });
+      var nav=fd.querySelector(".screennav");
+      assert("header @"+W+"px: the screen buttons live in a .screennav wrapper", !!nav);
+      if(!nav){ f.remove(); continue; }
+      var btns=[].slice.call(nav.querySelectorAll("button"));
+      assert("header @"+W+"px: the wrapper holds exactly Budget, Recurring, Trends in that order",
+        btns.map(function(b){ return b.textContent.trim(); }).join("|")==="Budget|Recurring|Trends");
+      var row=nav.getBoundingClientRect();
+      assert("header @"+W+"px: setup sanity: the frame really has layout (row and buttons have a width), else the fit checks below prove nothing",
+        row.width>100 && btns.every(function(b){ return b.getBoundingClientRect().width>20; }));
+      var tops={}, fits=true, inside=true, oneLine=true, detail=[];
+      btns.forEach(function(b){
+        var r=b.getBoundingClientRect(); tops[Math.round(r.top)]=1;
+        var cs=fd.defaultView.getComputedStyle(b);
+        var content=b.clientWidth-parseFloat(cs.paddingLeft)-parseFloat(cs.paddingRight);
+        var rg=fd.createRange(); rg.selectNodeContents(b);
+        var tw=rg.getBoundingClientRect().width;
+        detail.push(b.textContent.trim()+" text "+tw.toFixed(1)+" vs content "+content.toFixed(1)+" ("+cs.fontFamily.split(",")[0]+" "+cs.fontSize+" ls "+cs.letterSpacing+")");
+        if(tw>content+0.01) fits=false;
+        if(rg.getClientRects().length>1) oneLine=false;
+        if(r.left<row.left-0.5 || r.right>row.right+0.5) inside=false;
+      });
+      assert("header @"+W+"px: all three buttons share one row", Object.keys(tops).length===1);
+      assert("header @"+W+"px: no label is wider than its button's content box (no text overrunning padding)"+(fits?"":" ["+detail.join("; ")+"]"), fits);
+      assert("header @"+W+"px: no label wraps onto a second line", oneLine);
+      assert("header @"+W+"px: no button pokes out of the row", inside);
+      assert("header @"+W+"px: the page does not scroll horizontally", fd.documentElement.scrollWidth<=W);
+      f.remove();
+    }
+  })();
+
+
+  /* 103. (2026-10-04) Per-category spending history (backlog #4): the pure
+     data layer only, no UI yet. Decided design: a fixed window of 6 months
+     ending at the current real-world month, never starting before the
+     earliest entry in that direction; every month in the window present
+     (explicit zero, never omitted); expense and income never mixed; a
+     deleted category with past spend offered as "Name (deleted)".
+     The month totals are built by calling the existing sumByCategory per
+     month, and cross-checked here against sumByCategory/monthTotals/
+     entriesInMonth directly so the new layer cannot drift from the numbers
+     the rest of the app already shows. */
+  await (async function(){
+    if (typeof H.categoryHistory!=="function" || typeof H.categorySeries!=="function" ||
+        typeof H.historyCategoryOptions!=="function" || typeof H.HISTORY_MONTHS!=="number") {
+      assert("categoryHistory + categorySeries + historyCategoryOptions + HISTORY_MONTHS are exposed (fail-first guard)", false);
+      return;
+    }
+    function e(id,date,amt,cat,dir,extra){
+      return Object.assign({id:id,date:date,amountMinor:amt,direction:dir||"expense",categoryId:cat,note:"",
+        recurringId:null,updatedAt:"2026-10-01T00:00:00.000Z",updatedBy:"d",deleted:false,deletedAt:null},extra||{});
+    }
+    function keys(h){ return h.months.map(function(m){ return m.key; }).join(","); }
+    function series(h,cat){ return H.categorySeries(h,cat).map(function(r){ return r.minor; }).join(","); }
+
+    assert("the window is fixed at 6 months", H.HISTORY_MONTHS===6);
+
+    // --- window: 10 months of data -> exactly the last 6, oldest first, ending at the current month
+    var long=[];
+    for(var i=0;i<10;i++){ var mo=String(i+1).padStart(2,"0"); long.push(e("L"+i,"2026-"+mo+"-15",1000,"groc")); }
+    var hLong=H.categoryHistory(long,"expense",2026,9,6);
+    assert("window: 10 months of data -> the last 6, oldest first, ending at the current month",
+      keys(hLong)==="2026-05,2026-06,2026-07,2026-08,2026-09,2026-10");
+    assert("window: each month entry carries y and 0-based m consistent with its key",
+      hLong.months[0].y===2026 && hLong.months[0].m===4 && hLong.months[5].m===9);
+
+    // --- never before the earliest entry in that direction (fewer than 6 months of data)
+    var short=[e("S1","2026-08-20",500,"groc"), e("S2","2026-10-02",700,"groc")];
+    var hShort=H.categoryHistory(short,"expense",2026,9,6);
+    assert("fewer than 6 months of data: window starts at the earliest entry's month, not 6 months back",
+      keys(hShort)==="2026-08,2026-09,2026-10");
+    assert("...and a month inside that span with no entries is present as an explicit zero (not omitted)",
+      series(hShort,"groc")==="500,0,700");
+
+    // --- the earliest entry is per DIRECTION: income history must not start at an expense entry
+    var mixed=[e("M1","2026-05-10",100,"groc","expense"), e("M2","2026-09-25",250000,"salary","income")];
+    assert("earliest-entry rule is per direction: income window starts at the first INCOME entry",
+      keys(H.categoryHistory(mixed,"income",2026,9,6))==="2026-09,2026-10");
+    assert("earliest-entry rule is per direction: expense window starts at the first EXPENSE entry",
+      keys(H.categoryHistory(mixed,"expense",2026,9,6))==="2026-05,2026-06,2026-07,2026-08,2026-09,2026-10");
+
+    // --- empty / future-only / current-month-only edges
+    assert("no entries in that direction -> no months at all (the UI shows an empty state)",
+      H.categoryHistory([e("X1","2026-09-01",100,"salary","income")],"expense",2026,9,6).months.length===0);
+    assert("no entries at all -> no months", H.categoryHistory([],"expense",2026,9,6).months.length===0);
+    assert("entries dated after the current month are not 'previous months' and never extend the window",
+      H.categoryHistory([e("F1","2027-02-01",100,"groc")],"expense",2026,9,6).months.length===0);
+    assert("future-dated entries are ignored while earlier ones still count",
+      series(H.categoryHistory([e("F2","2026-10-03",100,"groc"),e("F3","2027-02-01",900,"groc")],"expense",2026,9,6),"groc")==="100");
+    assert("only the current month has data -> a single-month window",
+      keys(H.categoryHistory([e("C1","2026-10-03",100,"groc")],"expense",2026,9,6))==="2026-10");
+
+    // --- year rollover: window crossing Dec -> Jan
+    var yr=[e("Y1","2026-08-31",100,"groc"), e("Y2","2026-12-31",200,"groc"), e("Y3","2027-01-01",300,"groc")];
+    var hYr=H.categoryHistory(yr,"expense",2027,0,6);
+    assert("year rollover: window ending in January spans the previous year correctly", keys(hYr)==="2026-08,2026-09,2026-10,2026-11,2026-12,2027-01");
+    assert("year rollover: Dec 31 lands in December and Jan 1 in January (month boundary, not off by one)",
+      series(hYr,"groc")==="100,0,0,0,200,300");
+    assert("month boundary: Aug 31 is August, not September", H.categorySeries(hYr,"groc")[0].minor===100);
+
+    // --- direction separation and tombstoned entries
+    var dirs=[e("D1","2026-10-01",1000,"groc","expense"), e("D2","2026-10-02",5000,"groc","income"),
+              e("D3","2026-10-03",9999,"groc","expense",{deleted:true,deletedAt:"2026-10-03T00:00:00.000Z"})];
+    assert("expense history excludes income entries and deleted entries", series(H.categoryHistory(dirs,"expense",2026,9,6),"groc")==="1000");
+    assert("income history excludes expense entries", series(H.categoryHistory(dirs,"income",2026,9,6),"groc")==="5000");
+
+    // --- zero-spend categories and integer exactness
+    var ints=[e("I1","2026-10-01",1999,"groc"),e("I2","2026-10-02",1999,"groc"),e("I3","2026-10-03",1999,"groc")];
+    var hInt=H.categoryHistory(ints,"expense",2026,9,6);
+    assert("no float drift: three 19.99 entries total exactly 5997 minor units", series(hInt,"groc")==="5997");
+    assert("a category with no spend in the window gives a series of explicit zeros, one per month",
+      series(hLong,"never-spent")==="0,0,0,0,0,0");
+    assert("series entries carry key, y, m and an integer minor",
+      (function(){ var s=H.categorySeries(hInt,"groc")[0]; return s.key==="2026-10" && s.y===2026 && s.m===9 && Number.isInteger(s.minor); })());
+
+    // --- cross-check against the numbers the rest of the app already shows
+    H.resetState(); H.setView(2026,9);
+    var s0=H.getState(); s0.settings.currency="DKK"; H.setState(s0);
+    var plan=[["2026-06-05",1200,"seed-groceries","expense"],["2026-06-20",800,"seed-groceries","expense"],
+              ["2026-06-21",50000,"seed-salary","income"],["2026-08-31",4500,"seed-groceries","expense"],
+              ["2026-09-01",300,"seed-groceries","expense"],["2026-10-04",777,"seed-groceries","expense"],
+              ["2026-10-04",123456,"seed-salary","income"]];
+    plan.forEach(function(p){ H.createEntry({date:p[0],amountMinor:p[1],direction:p[3],categoryId:p[2],note:""}); });
+    var real=H.getState().entries;
+    ["expense","income"].forEach(function(dir){
+      var h=H.categoryHistory(real,dir,2026,9,6);
+      var allMatch=h.months.every(function(m){
+        var viaApp=H.sumByCategory(H.entriesInMonth(m.y,m.m).filter(function(x){ return x.direction===dir; }));
+        var a=[].concat(Array.from(m.totals.entries())).sort().join("|"), b=Array.from(viaApp.entries()).sort().join("|");
+        return a===b;
+      });
+      assert("cross-check ("+dir+"): every month's per-category totals equal sumByCategory(entriesInMonth(...)) from the app", allMatch && h.months.length>0);
+      var sumsMatch=h.months.every(function(m){
+        var tot=0; m.totals.forEach(function(v){ tot+=v; });
+        var mt=H.monthTotals(H.entriesInMonth(m.y,m.m));
+        return tot===(dir==="expense"?mt.expenses:mt.income);
+      });
+      assert("cross-check ("+dir+"): each month's categories sum to monthTotals' "+dir+" figure", sumsMatch);
+    });
+
+    // --- category options: live, deleted-with-spend, deleted-without-spend, unknown id
+    var cats=[
+      {id:"groc",name:"Groceries",direction:"expense",deleted:false},
+      {id:"fun",name:"Fun",direction:"expense",deleted:false},
+      {id:"gone",name:"Old Gym",direction:"expense",deleted:true},
+      {id:"gone2",name:"Never Used",direction:"expense",deleted:true},
+      {id:"salary",name:"Salary",direction:"income",deleted:false}
+    ];
+    var optEntries=[e("O1","2026-09-10",1000,"groc"),e("O2","2026-09-11",2500,"gone"),e("O3","2026-10-02",400,"ghost-id")];
+    var hOpt=H.categoryHistory(optEntries,"expense",2026,9,6);
+    var opts=H.historyCategoryOptions(cats,hOpt);
+    var byId={}; opts.forEach(function(o){ byId[o.id]=o; });
+    assert("options: live categories of this direction are offered, including one with zero spend", !!byId.groc && !!byId.fun);
+    assert("options: a live category with zero spend is still offered and shows a 0 total", byId.fun.total===0 && byId.groc.total===1000);
+    assert("options: the other direction's categories are not offered", !byId.salary);
+    assert("options: a deleted category WITH spend in the window is offered as 'Name (deleted)'",
+      !!byId.gone && byId.gone.label==="Old Gym (deleted)" && byId.gone.deleted===true && byId.gone.total===2500);
+    assert("options: a deleted category with NO spend in the window is not offered", !byId.gone2);
+    assert("options: spend under an id with no category record at all is offered as 'Uncategorized'",
+      !!byId["ghost-id"] && byId["ghost-id"].label==="Uncategorized" && byId["ghost-id"].total===400);
+    assert("options: live categories come first, deleted/unknown after (stable, predictable switcher order)",
+      opts.map(function(o){ return o.id; }).join(",")==="groc,fun,gone,ghost-id");
+    assert("options: window for these entries is Sep..Oct (earliest expense entry is Sep), and a deleted category's spend stays under its OWN id there (Sep 2500, Oct 0), not folded into Uncategorized",
+      keys(hOpt)==="2026-09,2026-10" && series(hOpt,"gone")==="2500,0" && series(hOpt,"ghost-id")==="0,400");
+    assert("options: a live category's label has no '(deleted)' suffix", byId.groc.label==="Groceries" && byId.groc.deleted===false);
+
+    H.resetState();
+  })();
+
   return results;
 }
 })();

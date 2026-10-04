@@ -388,6 +388,72 @@ function sumByCategory(entries) {
   return totals;
 }
 
+// ---- Per-category spending history (backlog #4, data layer only) ---------
+//
+// Pure: takes an entries array, never reads `state`, so it is directly
+// testable. Month totals are built by calling sumByCategory once per month,
+// the same function the category rail and Budget list use, so these numbers
+// cannot drift from the ones the rest of the app shows (and the self-test
+// cross-checks them against sumByCategory/monthTotals/entriesInMonth).
+//
+// Window (decided with Sebastian, see CLAUDE.md backlog #4): at most
+// HISTORY_MONTHS months ending at (endY, endM), the current real-world
+// month, and never starting before the earliest entry in this direction. Every month in the window
+// is present, a month with no spend is an explicit 0. Entries dated after
+// the end month are not "previous months" and are ignored entirely.
+// Months are compared as "YYYY-MM" strings sliced from the entry's
+// "YYYY-MM-DD" local calendar date, so no Date/timezone arithmetic is involved.
+const HISTORY_MONTHS = 6;
+
+function categoryHistory(entries, direction, endY, endM, maxMonths) {
+  const endKey = monthKey(endY, endM);
+  const live = entries.filter((e) => !e.deleted && e.direction === direction && e.date.slice(0, 7) <= endKey);
+  if (live.length === 0) return { direction, months: [] };
+  let earliest = live[0].date.slice(0, 7);
+  live.forEach((e) => { const k = e.date.slice(0, 7); if (k < earliest) earliest = k; });
+  const endIdx = endY * 12 + endM;
+  const earliestIdx = Number(earliest.slice(0, 4)) * 12 + (Number(earliest.slice(5, 7)) - 1);
+  const count = Math.min(maxMonths, endIdx - earliestIdx + 1);
+  const months = [];
+  for (let i = count - 1; i >= 0; i--) {
+    const idx = endIdx - i;
+    const y = Math.floor(idx / 12), m = idx % 12, key = monthKey(y, m);
+    months.push({ key, y, m, totals: sumByCategory(live.filter((e) => e.date.slice(0, 7) === key)) });
+  }
+  return { direction, months };
+}
+
+// One category's row-per-month series from a history: always one entry per
+// month in the window, minor = 0 when that category had no spend that month.
+function categorySeries(history, categoryId) {
+  return history.months.map((mo) => ({ key: mo.key, y: mo.y, m: mo.m, minor: mo.totals.get(categoryId) || 0 }));
+}
+
+// What the category switcher offers for a history: every live category of
+// this direction (even with zero spend, so "I spent nothing" is a visible
+// answer), then deleted categories that have spend in the window labelled
+// "Name (deleted)" (the tombstone keeps the name, so history stays truthful),
+// then spend under an id with no category record at all as "Uncategorized".
+// A deleted category with no spend in the window is not offered.
+function historyCategoryOptions(categories, history) {
+  const dir = history.direction;
+  const spent = new Map();
+  history.months.forEach((mo) => mo.totals.forEach((v, id) => spent.set(id, (spent.get(id) || 0) + v)));
+  const known = new Set(categories.map((c) => c.id));
+  const opts = [];
+  categories.forEach((c) => {
+    if (c.direction === dir && !c.deleted) opts.push({ id: c.id, label: c.name, deleted: false, total: spent.get(c.id) || 0 });
+  });
+  categories.forEach((c) => {
+    const total = spent.get(c.id) || 0;
+    if (c.direction === dir && c.deleted && total > 0) opts.push({ id: c.id, label: c.name + " (deleted)", deleted: true, total });
+  });
+  const unknown = [];
+  spent.forEach((total, id) => { if (!known.has(id) && total > 0) unknown.push({ id, label: "Uncategorized", deleted: false, total }); });
+  unknown.sort((a, b) => b.total - a.total || (a.id < b.id ? -1 : 1));
+  return opts.concat(unknown);
+}
+
 function formatMoney(minor, currency) {
   const locale = CURRENCY_LOCALE[currency] || "en-US";
   const isWhole = minor % 100 === 0;
@@ -2898,6 +2964,7 @@ function exposeTestHook() {
     SEED_CATEGORIES,
 
     formatMoney, formatCompact, parseAmountToMinor, monthTotals, sumByCategory,
+    categoryHistory, categorySeries, historyCategoryOptions, HISTORY_MONTHS,
     getViewDir: () => viewDir,
     setViewDir: (dir) => { viewDir = dir; registerCatFilter.clear(); renderAll(); },
 

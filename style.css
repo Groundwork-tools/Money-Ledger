@@ -29,6 +29,10 @@ button{cursor:pointer}
 .wordmark-btn{display:block;border:0;background:transparent;padding:0;margin:0;font:inherit;color:inherit;text-align:left;cursor:pointer}
 .monthnav{display:flex;align-items:center;gap:8px;margin-left:auto}
 .monthlabel{font-family:var(--mono);font-size:13px;padding:7px 9px;min-width:150px;text-align:center;border:1px solid var(--rule)}
+/* Budget / Recurring / Trends. display:contents on desktop so the buttons lay
+   out exactly as they did before the wrapper existed (still flex children of
+   .monthnav); the wrapper only becomes a real box in the phone block below. */
+.screennav{display:contents}
 .stepper{width:34px;height:34px;border:1px solid var(--ink);background:transparent;font-size:15px;line-height:1;display:grid;place-items:center;flex:none}
 .stepper:hover{background:var(--ink);color:var(--paper)}
 .ghost{border:1px solid var(--rule);background:transparent;padding:8px 12px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:600}
@@ -325,6 +329,12 @@ button{cursor:pointer}
 @media(max-width:700px){
   .wordmark{font-size:30px}
   .monthnav{width:100%;margin-left:0;flex-wrap:wrap}
+  /* Own full-width row of three equal buttons under the month stepper. The
+     tighter padding and letter-spacing are measured, not guessed: with the
+     default .ghost padding "Recurring" overran its content box at 360px and
+     was clipped at 320px. */
+  .screennav{display:flex;flex:1 0 100%;gap:8px}
+  .screennav .ghost{flex:1 1 0;min-width:0;padding:8px 4px;letter-spacing:.06em}
   .quickadd-row{flex-direction:column;align-items:stretch}
   .qa-amount,.qa-date,.qa-cat{width:100%}
   .tools .ghost{min-width:0}
