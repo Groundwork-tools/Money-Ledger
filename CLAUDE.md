@@ -1192,6 +1192,82 @@ Sebastian — the OAuth console change and the real-device confirmation
 happened outside this tool session, so they're recorded here on his word,
 not independently verified from here.
 
+## General fixes (2026-10-04)
+
+**Sync failures are now diagnosable and classified (phone Chrome "The quota
+has been exceeded" report).** Reported as a Drive quota error on phone only.
+Diagnosed rather than assumed:
+
+- **The text did not come from Drive.** Every Drive failure used to be thrown
+  as a bare `drive-<op>-<status>` and the response body was never read, so no
+  Drive `reason` could ever have reached a toast. "The quota has been
+  exceeded." is, as far as I recall, WebKit's stock message for a full
+  `localStorage` (Chrome on iPhone is WebKit). Chrome desktop's message is
+  different (checked: "Failed to execute 'setItem' on 'Storage'..."). The
+  old catch-all toast then labelled it "Couldn't reach Google Drive".
+  **Not yet confirmed on the phone**: it is the leading explanation, not a
+  proven cause. The new toast names the biggest localStorage keys so the
+  next occurrence identifies the consumer. GitHub Pages project sites share
+  ONE origin (see SYNC-LESSONS #5), so Hours Ledger's keys count against the
+  same quota; Hours Ledger stores up to 12 full-state undo snapshots in
+  localStorage, which is the first thing to check.
+- **No request loop exists.** Measured with the real `app.js` against a
+  counting `fetch` stub: page load 3 requests, connect/reconnect 3, each
+  debounced edit 2 (three edits inside 1.2s still 2). No render-to-save
+  path, no retry timers. Before this change two overlapping `syncNow` calls
+  interleaved (read, read, update, update).
+- **New behavior.** `driveHttpError` reads status + `error.errors[0].reason`
+  + message. `classifySyncError`: 401 is "auth" (drop token, existing
+  needs-reconnect state, tap-anywhere reconnect picks it up); 429 / 5xx /
+  rate-limit reasons are "backoff" (token kept, exponential back-off from
+  30s capped at 10min, one retry timer, zero requests while backing off);
+  local `QuotaExceededError` is "storage" (never blamed on Drive, and a
+  failed local write no longer stops the push or lets "Synced" overwrite
+  the warning). `syncNow` checks the token's known expiry before sending
+  (the Hours Ledger pattern), holds an in-flight guard with a queued rerun,
+  and a `visibilitychange` check surfaces a lapse on tab refocus.
+  Deviations from Hours Ledger, on purpose: it never reacts to a 401 (a
+  revoked token has a valid-looking expiry), and it has no rate-limit class.
+- **Decision: `saveState` catches a full-origin `QuotaExceededError`
+  instead of throwing (not originally requested).** Before: the exception
+  escaped every UI handler that saves, so on a full origin an action just
+  failed with nothing on screen. Now: the entry stays in memory (the app
+  keeps working this session), it is NOT in `localStorage`, and the toast
+  says "Not saved on this device: ... storage ... is full ... in memory only
+  and will be lost if you close or reload the app". If Drive is connected
+  the debounced push still runs, so the entry reaches Drive and Drive can
+  hold what this device cannot. Reasoning: silently failing is the worst
+  option for a ledger, and an honest message plus a Drive copy is strictly
+  safer than a crash; the alternative of refusing the edit outright was
+  rejected because the person may have just typed an entry they would lose
+  either way. Only `QuotaExceededError` is caught; any other storage error
+  still throws. Pinned by self-test block 100.
+- **Hard rule 6 under a failed local write.** A failed local write never
+  removes a record on either side: the merge happens in memory, the push
+  still goes out, so Drive receives a superset (including local tombstones
+  as tombstones, not removals). Tested with records present only locally,
+  only on Drive, and a local delete of a record Drive still holds live.
+  Limit of the test: it simulates the failure by making `setItem` throw; it
+  assumes (per the Web Storage spec) that a failed `setItem` leaves the
+  previous stored value intact, which only a real browser can confirm.
+- **Cache-busting.** `index.html` loads `style.css?v=TOKEN` and
+  `app.js?v=TOKEN` so a phone cannot serve a stale cached script beside a
+  fresh page (the 2026-08-12 gotcha). TOKEN is a hand-bumped string (current:
+  `20261004a`), not a commit hash, because a commit cannot contain its own
+  hash and there is no build step to inject one. **On every deploy that
+  changes `app.js` or `style.css`, change TOKEN in BOTH tags** (date plus a
+  letter, e.g. `20261015a`). A self-test fails if the two tokens differ or
+  are missing, but nothing can detect a forgotten bump. Limit: it only
+  helps once the phone has a fresh `index.html`, which GitHub Pages lets
+  browsers cache for about 10 minutes. `privacy.html` also links
+  `style.css` unversioned; left alone.
+- **Verification:** self-test blocks 98 to 101 (75 new checks, suite
+  400/0), written first and watched fail against old behavior (3, 16 and 6
+  failing in the three rounds). Nine single-behavior mutations each flip
+  the intended tests. Two vacuous passes were caught and fixed in the tests themselves
+  (a stub keyed on the wrong storage key; a toast element that keeps stale
+  text). **Not real-device-verified.**
+
 ## Testing before you claim it works
 
 There is an automated self-test suite — `money-ledger-selftest.html`,

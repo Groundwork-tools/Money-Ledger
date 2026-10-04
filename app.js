@@ -154,7 +154,16 @@ function backfillRecordFields(record, fallbackUpdatedAt) {
 
 function saveState() {
   state.updatedAt = nowIso();
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch (err) {
+    // A full origin (GitHub Pages project sites share ONE ~5MB localStorage
+    // with Hours Ledger) used to throw out of every handler with no message.
+    // Still schedules the Drive push below: Drive can hold what this device
+    // can't. Anything else is a real bug and still throws.
+    if (!(err && err.name === "QuotaExceededError")) throw err;
+    toast(describeSyncError(err));
+  }
   if (state.settings.driveConnected && driveAccessToken) {
     clearTimeout(saveState._drivePush);
     saveState._drivePush = setTimeout(() => syncNow(false), 1200);
@@ -187,6 +196,19 @@ function regenerateDeviceId() {
 
 let state = loadState();
 let driveAccessToken = null;
+// When driveAccessToken stops being valid (ms epoch), if known. In memory
+// only. null = unknown, which is never treated as expired - keeps the
+// 401 path as the backstop for a token whose expiry we never learned.
+let driveTokenExpiresAt = null;
+// One sync in flight at a time; a request that arrives meanwhile sets the
+// queued flag and runs once, after, so a later edit is never dropped.
+let driveSyncInFlight = false;
+let driveSyncQueued = false;
+// Rate-limit back-off. Never persisted: a reload is a fresh start.
+let driveBackoffBaseMs = 30000;
+let driveBackoffStep = 0;
+let driveBackoffUntil = 0;
+let driveBackoffTimer = null;
 let driveTokenClient = null;
 
 // "Tap anywhere to reconnect": one attempt per token-expired episode. A
@@ -241,6 +263,19 @@ function clearDriveTokenCache() {
 // directly on the test hook so a test can plant "what's already on Drive"
 // before driving a device's real sync flow, or inspect what got pushed.
 let FAKE_DRIVE = {};
+// TEST_MODE-only seams, consulted inside the fake Drive branches below (never
+// reachable in real mode): an injected failure is turned into an Error by the
+// REAL driveHttpError, so classification is tested end to end; the call log
+// lets a test assert how many requests an action made and in what order.
+let FAKE_DRIVE_FAIL = null;   // null | { status, body, ops?: ["read"|"update"|...] }
+let FAKE_DRIVE_CALLS = [];
+async function fakeDriveEnter(op) {
+  FAKE_DRIVE_CALLS.push(op);
+  if (FAKE_DRIVE_FAIL && (!FAKE_DRIVE_FAIL.ops || FAKE_DRIVE_FAIL.ops.indexOf(op) !== -1)) {
+    const f = FAKE_DRIVE_FAIL;
+    throw await driveHttpError(op, { status: f.status, json: async () => f.body });
+  }
+}
 let fakeDriveNextId = 1;
 let viewMonth = new Date().getMonth();
 let viewYear = new Date().getFullYear();
@@ -1390,6 +1425,16 @@ function initSettings() {
     }, true);
   }
 
+  // Back in the foreground after an idle spell: surface a lapsed token now
+  // rather than at the next save (Hours Ledger does the same on refocus).
+  // Network-free, never opens OAuth. Not wired in TEST_MODE; the suite calls
+  // checkTokenLapse directly.
+  if (!TEST_MODE) {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") checkTokenLapse();
+    });
+  }
+
   document.getElementById("exportBtn").addEventListener("click", () => {
     const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -1589,12 +1634,71 @@ function driveTokenClientFor(callback, errorCallback) {
   return driveTokenClient;
 }
 
+// Turns a failed Drive fetch into a diagnosable Error. Drive's response body
+// says WHICH limit was hit (error.errors[0].reason: rateLimitExceeded,
+// userRateLimitExceeded, storageQuotaExceeded, authError...) - a bare status
+// can't tell a 403 rate limit from a 403 full-Drive. Everything is also
+// logged in full so a desktop console shows the raw body. Never throws: an
+// unreadable body just means no reason.
+async function driveHttpError(op, res) {
+  let body = null;
+  try { body = await res.json(); } catch (e) { /* non-JSON / empty body */ }
+  const e = (body && body.error) || {};
+  const reason = (e.errors && e.errors[0] && e.errors[0].reason) || e.status || "";
+  const driveMessage = e.message || "";
+  console.error("Money Ledger: Drive " + op + " failed", { status: res.status, reason, message: driveMessage, body });
+  const err = new Error("drive-" + op + "-" + res.status + (reason ? " " + reason : ""));
+  err.status = res.status;
+  err.reason = reason;
+  err.driveMessage = driveMessage;
+  err.driveOp = op;
+  return err;
+}
+
+// What is using this origin's localStorage quota, biggest first. GitHub Pages
+// project sites share ONE origin (see SYNC-LESSONS #5), so Hours Ledger's
+// keys count against the same ~5MB as this app's. Sizes are characters
+// (key + value); browsers store UTF-16, so bytes are roughly double.
+function storageUsageReport() {
+  const rows = [];
+  let totalChars = 0;
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      const chars = key.length + (localStorage.getItem(key) || "").length;
+      rows.push({ key, chars });
+      totalChars += chars;
+    }
+  } catch (e) { /* storage unreadable - report what we have */ }
+  rows.sort((a, b) => b.chars - a.chars);
+  return { totalChars, top: rows.slice(0, 3) };
+}
+
+// The one place a sync/connect failure becomes toast text. A local storage
+// failure must never be blamed on Drive (the phone report: WebKit's
+// QuotaExceededError "The quota has been exceeded." arrived as "Couldn't
+// reach Google Drive (...)"), and a Drive failure must carry its reason.
+function describeSyncError(err) {
+  if (err && err.name === "QuotaExceededError") {
+    const u = storageUsageReport();
+    const kb = (n) => Math.round(n * 2 / 1024).toLocaleString("en-US") + " KB";
+    const who = u.top.map((r) => r.key + " " + kb(r.chars)).join(", ");
+    console.error("Money Ledger: localStorage full", u);
+    return "Not saved on this device: this browser's storage for this site is full (" + kb(u.totalChars) + " used: " + who + "). This change exists in memory only and will be lost if you close or reload the app. If Drive sync is connected it still goes to Drive.";
+  }
+  if (err && err.driveOp) {
+    return "Couldn't reach Google Drive (" + err.message + (err.driveMessage ? ": " + err.driveMessage : "") + "). Try again in a moment.";
+  }
+  return "Couldn't reach Google Drive (" + (err && err.message ? err.message : err) + "). Try again in a moment.";
+}
+
 // Always searches by name — never blind-trusts a previously cached file id.
 // If more than one match turns up (e.g. two devices once created separate
 // files before either found the other's), that's surfaced rather than
 // silently picked, since it means two histories may need reconciling.
 async function driveFindFiles() {
   if (TEST_MODE) {
+    await fakeDriveEnter("list");
     return Object.keys(FAKE_DRIVE)
       .filter((id) => FAKE_DRIVE[id].name === DRIVE_FILE_NAME)
       .map((id) => ({ id, name: FAKE_DRIVE[id].name }));
@@ -1603,13 +1707,14 @@ async function driveFindFiles() {
   const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name)`, {
     headers: { Authorization: `Bearer ${driveAccessToken}` },
   });
-  if (!res.ok) throw new Error("drive-list-" + res.status);
+  if (!res.ok) throw await driveHttpError("list", res);
   const data = await res.json();
   return data.files || [];
 }
 
 async function driveCreateFile(contentStr) {
   if (TEST_MODE) {
+    await fakeDriveEnter("create");
     const id = "fake-" + fakeDriveNextId++;
     FAKE_DRIVE[id] = { name: DRIVE_FILE_NAME, content: contentStr };
     return id;
@@ -1624,13 +1729,14 @@ async function driveCreateFile(contentStr) {
     headers: { Authorization: `Bearer ${driveAccessToken}`, "Content-Type": `multipart/related; boundary=${boundary}` },
     body,
   });
-  if (!res.ok) throw new Error("drive-create-" + res.status);
+  if (!res.ok) throw await driveHttpError("create", res);
   const data = await res.json();
   return data.id;
 }
 
 async function driveUpdateFile(fileId, contentStr) {
   if (TEST_MODE) {
+    await fakeDriveEnter("update");
     if (!FAKE_DRIVE[fileId]) throw new Error("fake-drive-404");
     FAKE_DRIVE[fileId].content = contentStr;
     return;
@@ -1640,18 +1746,19 @@ async function driveUpdateFile(fileId, contentStr) {
     headers: { Authorization: `Bearer ${driveAccessToken}`, "Content-Type": "application/json" },
     body: contentStr,
   });
-  if (!res.ok) throw new Error("drive-update-" + res.status);
+  if (!res.ok) throw await driveHttpError("update", res);
 }
 
 async function driveReadFile(fileId) {
   if (TEST_MODE) {
+    await fakeDriveEnter("read");
     if (!FAKE_DRIVE[fileId]) throw new Error("fake-drive-404");
     return JSON.parse(FAKE_DRIVE[fileId].content);
   }
   const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
     headers: { Authorization: `Bearer ${driveAccessToken}` },
   });
-  if (!res.ok) throw new Error("drive-read-" + res.status);
+  if (!res.ok) throw await driveHttpError("read", res);
   return res.json();
 }
 
@@ -1772,6 +1879,107 @@ async function resolveDriveFileId() {
   return fileId;
 }
 
+// ---- Sync failure handling (2026-10-04) --------------------------------
+//
+// Three different failures used to be one silent "console.error and carry
+// on", which is how an expired token kept firing dead requests and a
+// rate-limited device re-hit Drive on every save. They need opposite
+// handling:
+//   "auth"    401 - the token is dead (expired or revoked). Waiting won't
+//             help, reconnecting will. Drop it and land in the existing
+//             "needs reconnect" state; tap-anywhere reconnect does the rest.
+//   "backoff" rate limit / 5xx - the token is fine, Drive is saying "slower".
+//             Reconnecting would only add an OAuth popup on top of the
+//             problem. Back off, retry once on a timer, never hammer.
+//   "storage" local QuotaExceededError - not a Drive problem at all.
+//   "other"   anything else (404, Drive's own storage full, a bug): surfaced
+//             when the user asked for the sync, otherwise console only.
+// Modelled on Hours Ledger, which checks the token's known expiry before
+// every sync and holds an in-flight guard. Deliberate differences: it never
+// reacts to a 401 (a revoked token still carries a future expiry, so this
+// does), and it has no rate-limit class (one generic "sync failed").
+const DRIVE_RATE_REASONS = ["rateLimitExceeded", "userRateLimitExceeded", "dailyLimitExceeded", "sharingRateLimitExceeded", "quotaExceeded"];
+const DRIVE_BACKOFF_MAX_MS = 600000;
+
+function classifySyncError(err) {
+  if (err && err.name === "QuotaExceededError") return "storage";
+  if (err && err.driveOp) {
+    if (err.status === 401) return "auth";
+    if (err.status === 429 || err.status >= 500 || DRIVE_RATE_REASONS.indexOf(err.reason) !== -1) return "backoff";
+  }
+  return "other";
+}
+
+// Same safety margin as the token cache, so the in-memory check and the
+// page-load check can never disagree about whether a token is usable.
+function tokenIsLapsed(expiresAt, now) {
+  return expiresAt != null && now > expiresAt - DRIVE_TOKEN_SAFETY_MARGIN_MS;
+}
+
+function nextBackoffMs(step, baseMs) {
+  return Math.min(baseMs * Math.pow(2, step), DRIVE_BACKOFF_MAX_MS);
+}
+
+// Drops a dead token and surfaces the existing needs-reconnect state
+// (connected && no token - what renderSettings and resolveGestureReconnect
+// already key off). Never opens OAuth itself: that stays behind a real tap.
+function lapseDriveToken() {
+  const wasLive = !!driveAccessToken;
+  driveAccessToken = null;
+  driveTokenExpiresAt = null;
+  clearDriveTokenCache();
+  driveReconnectAttempted = false; // a fresh episode - let the next tap resolve it
+  renderSettings();
+  // Only on the live -> lapsed edge, so a burst of failures toasts once.
+  if (wasLive) toast("Google Drive session expired. Tap anywhere to reconnect - your data is safe on this device.");
+}
+
+// Cheap, network-free: call when the tab comes back to the foreground so a
+// lapse that happened while idle shows immediately instead of at the next save.
+function checkTokenLapse() {
+  if (state.settings.driveConnected && driveAccessToken && tokenIsLapsed(driveTokenExpiresAt, Date.now())) {
+    lapseDriveToken();
+  }
+}
+
+// One retry timer, re-armed rather than stacked. If it fires early (timer
+// drift), syncNow's own back-off check re-arms it, so it can't be lost.
+function armBackoffRetry() {
+  if (driveBackoffTimer) return;
+  const wait = Math.max(0, driveBackoffUntil - Date.now()) + 100;
+  driveBackoffTimer = setTimeout(() => { driveBackoffTimer = null; syncNow(false); }, wait);
+}
+
+function startBackoff() {
+  driveBackoffUntil = Date.now() + nextBackoffMs(driveBackoffStep, driveBackoffBaseMs);
+  driveBackoffStep++;
+  clearTimeout(driveBackoffTimer);
+  driveBackoffTimer = null;
+  armBackoffRetry();
+}
+
+function clearBackoff() {
+  driveBackoffStep = 0;
+  driveBackoffUntil = 0;
+  clearTimeout(driveBackoffTimer);
+  driveBackoffTimer = null;
+}
+
+// userInitiated = a connect/reconnect the person just asked for, so silence
+// would read as "nothing happened". Background syncs stay quiet unless the
+// token lapsed (that always toasts once, see lapseDriveToken).
+function handleSyncFailure(err, userInitiated) {
+  const kind = classifySyncError(err);
+  console.error("Money Ledger: sync failed (" + kind + ")", err);
+  if (kind === "auth") { lapseDriveToken(); return; }
+  if (kind === "backoff") {
+    startBackoff();
+    if (userInitiated) toast("Google Drive is rate-limiting requests (" + (err.reason || err.status) + "). Your data is safe on this device; Money Ledger will retry by itself.");
+    return;
+  }
+  if (userInitiated) toast(describeSyncError(err));
+}
+
 // The one sync entry point, used identically whether triggered by saving,
 // connecting, reconnecting, or the silent reload check — merge, save
 // locally (safe, can't lose anything), only then attempt the network push.
@@ -1780,12 +1988,29 @@ async function resolveDriveFileId() {
 // rule 6 and the partial-write discussion in the commit history).
 async function syncNow(showToast) {
   if (!state.settings.driveFileId || !driveAccessToken) return;
+  // A token we already know is expired must not be sent to Drive at all.
+  if (tokenIsLapsed(driveTokenExpiresAt, Date.now())) { lapseDriveToken(); return; }
+  // Backing off: local data is already saved; the armed timer retries once.
+  if (Date.now() < driveBackoffUntil) { armBackoffRetry(); return; }
+  if (driveSyncInFlight) { driveSyncQueued = true; return; }
+  driveSyncInFlight = true;
+  try {
+    await syncOnce(showToast);
+  } finally {
+    driveSyncInFlight = false;
+  }
+  if (driveSyncQueued) {
+    driveSyncQueued = false;
+    await syncNow(false);
+  }
+}
 
+async function syncOnce(showToast) {
   let remote;
   try {
     remote = await driveReadFile(state.settings.driveFileId);
   } catch (err) {
-    console.error("Drive read failed, will retry later", err);
+    handleSyncFailure(err, showToast);
     return;
   }
 
@@ -1811,7 +2036,17 @@ async function syncNow(showToast) {
   }
 
   state.updatedAt = nowIso();
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); // safe local write, before any network risk
+  let persistFailed = false;
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); // safe local write, before any network risk
+  } catch (err) {
+    persistFailed = true;
+    // Local storage full: say so, but still push below. The merge is
+    // already in memory and Drive holding a superset is strictly safer than
+    // aborting here (hard rule 6 is about never dropping a record).
+    if (!(err && err.name === "QuotaExceededError")) throw err;
+    toast(describeSyncError(err));
+  }
 
   const adopted = entryMerge.adoptedFromRemote + catMerge.adoptedFromRemote + recMerge.adoptedFromRemote;
   const superseded = entryMerge.superseded + catMerge.superseded + recMerge.superseded;
@@ -1819,16 +2054,18 @@ async function syncNow(showToast) {
 
   try {
     await driveUpdateFile(state.settings.driveFileId, JSON.stringify(state));
+    clearBackoff(); // a full round trip worked - Drive is happy again
     // Superseded edits are deliberately not surfaced to the user — see
     // CLAUDE.md "No user-facing notice on last-write-wins" — but logged
     // for anyone actually looking (devtools console, not the UI).
     if (superseded > 0) console.log(`Sync: ${superseded} local edit(s) superseded by a newer edit from another device.`);
-    if (showToast && adopted > 0) {
+    // Not when the local write failed: "Synced" would overwrite the storage warning with good news that isn't true on this device.
+    if (showToast && adopted > 0 && !persistFailed) {
       toast(`Synced — ${adopted} record(s) added from Drive.`);
     }
     // clean merge, nothing to say
   } catch (err) {
-    console.error("Drive push failed, will retry on next save", err);
+    handleSyncFailure(err, showToast);
   }
   renderSettings();
 }
@@ -1886,6 +2123,8 @@ function handleDriveAuthResult(resp, isFirstConnect) {
     return;
   }
   driveAccessToken = resp.access_token;
+  driveTokenExpiresAt = Date.now() + resp.expires_in * 1000;
+  clearBackoff(); // a person just reconnected on purpose - don't make them wait out an old window
   driveReconnectAttempted = false; // token obtained — re-arm for any future expiry this session
   saveDriveTokenCache(resp.access_token, resp.expires_in);
   return (async () => {
@@ -1897,8 +2136,7 @@ function handleDriveAuthResult(resp, isFirstConnect) {
       }
       await syncNow(true);
     } catch (err) {
-      console.error(err);
-      toast("Couldn't reach Google Drive (" + (err && err.message ? err.message : err) + "). Try again in a moment.");
+      handleSyncFailure(err, true);
     }
   })();
 }
@@ -1926,6 +2164,8 @@ function reconnectDrive() {
 
 function disconnectDrive() {
   driveAccessToken = null;
+  driveTokenExpiresAt = null;
+  clearBackoff();
   clearDriveTokenCache();
   state.settings.driveConnected = false;
   saveState();
@@ -2035,11 +2275,13 @@ function resumeDriveSyncIfTokenCached(onSettled) {
   }
   // plan === "resume-from-cache": still-valid token from an earlier page
   // load this hour — use it directly, no Google round-trip, no popup.
-  driveAccessToken = loadDriveTokenCache().token;
+  const cached = loadDriveTokenCache();
+  driveAccessToken = cached.token;
+  driveTokenExpiresAt = cached.expiresAt;
   driveReconnectAttempted = false; // usable token this load — re-arm for a later expiry
   resolveDriveFileId()
     .then(() => syncNow(false))
-    .catch((err) => console.error(err))
+    .catch((err) => handleSyncFailure(err, false))
     .then(done);
 }
 
@@ -2559,9 +2801,17 @@ function exposeTestHook() {
       state = defaultState();
       localStorage.removeItem(STORAGE_KEY);
       clearDriveTokenCache();
+      clearTimeout(saveState._drivePush); // a stray debounced push from an earlier test must not land in this one
       FAKE_DRIVE = {};
+      FAKE_DRIVE_FAIL = null;
+      FAKE_DRIVE_CALLS = [];
       fakeDriveNextId = 1;
       driveAccessToken = null;
+      driveTokenExpiresAt = null;
+      driveSyncInFlight = false;
+      driveSyncQueued = false;
+      driveBackoffBaseMs = 30000;
+      clearBackoff();
       driveReconnectAttempted = false;
       clearDriveAuthWatchdog();
       lastOAuthWindow = null;
@@ -2594,6 +2844,14 @@ function exposeTestHook() {
       return loadState();
     },
 
+    setFakeDriveFailure: (f) => { FAKE_DRIVE_FAIL = f; },
+    getFakeDriveCalls: () => FAKE_DRIVE_CALLS.slice(),
+    resetFakeDriveCalls: () => { FAKE_DRIVE_CALLS = []; },
+    getDriveAccessToken: () => driveAccessToken,
+    classifySyncError, tokenIsLapsed, nextBackoffMs, checkTokenLapse,
+    setDriveTokenExpiresAt: (ms) => { driveTokenExpiresAt = ms; },
+    setDriveBackoffBaseMs: (ms) => { driveBackoffBaseMs = ms; },
+    getDriveBackoffUntil: () => driveBackoffUntil,
     getFakeDrive: () => FAKE_DRIVE,
     resetFakeDrive: () => { FAKE_DRIVE = {}; fakeDriveNextId = 1; },
 
@@ -2618,6 +2876,10 @@ function exposeTestHook() {
     getDriveReconnectAttempted: () => driveReconnectAttempted,
     setDriveReconnectAttempted: (v) => { driveReconnectAttempted = v; },
     armDriveAuthWatchdog, clearDriveAuthWatchdog,
+
+    // Failure diagnostics (2026-10-04): Drive error body parsing, the
+    // toast wording, and the localStorage-usage report it embeds.
+    driveHttpError, describeSyncError, storageUsageReport,
 
     syncNow, resolveDriveFileId, mergeRecords, sameContent, newerSide,
     ENTRY_CONTENT_FIELDS, CATEGORY_CONTENT_FIELDS, AMBIGUOUS_WINDOW_MS, DRIVE_FILE_NAME,

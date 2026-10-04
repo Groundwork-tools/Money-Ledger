@@ -2550,6 +2550,387 @@ async function runTests(H,d){
     H.resetState();
   })();
 
+  /* 98. (2026-10-04) Drive/sync failure diagnostics. Real-device report:
+     phone Chrome toasted "Couldn't reach Google Drive (The quota has been
+     exceeded). Try again in a moment." Two defects behind that text, both
+     asserted here:
+       (a) a LOCAL storage failure (localStorage QuotaExceededError - WebKit's
+           stock message for it is exactly "The quota has been exceeded.")
+           was reported as a Drive problem, because every error from the
+           connect path funnelled into one "Couldn't reach Google Drive"
+           string. It has to say it's browser storage, with what is using it.
+       (b) real Drive HTTP errors were thrown as bare "drive-read-403" - the
+           response body's reason (rateLimitExceeded vs userRateLimitExceeded
+           vs storageQuotaExceeded...) was never read, so no failure could be
+           diagnosed from the phone. */
+  await (async function(){
+    var w=d.defaultView;
+    function toastText(){ return d.getElementById("toast").querySelector(".msg").textContent; }
+
+    // --- (a) behavioural, uses only long-exposed functions so it can fail against OLD code
+    H.resetState(); H.setView(2026,7);
+    var sa=H.getState(); sa.settings.currency="DKK"; H.setState(sa);
+    var realSet=w.Storage.prototype.setItem, overflowFired=0;
+    w.Storage.prototype.setItem=function(k,v){
+      // Only the ledger blob overflows (as in a nearly-full origin); the tiny
+      // token-cache write before it still succeeds, like on the real device.
+      if(String(k).indexOf("money-ledger-v1")===0){ overflowFired++; throw new w.DOMException("The quota has been exceeded.","QuotaExceededError"); }
+      return realSet.apply(this,arguments);
+    };
+    try{
+      await H.handleDriveAuthResult({access_token:"tok",expires_in:3600},true);
+    } finally { w.Storage.prototype.setItem=realSet; }
+    var t=toastText();
+    assert("setup sanity: the simulated ledger-write overflow actually fired (else the next checks prove nothing)",
+      overflowFired>=1 && t!=="");
+    assert("storage-full toast says 'not saved on this device'", /not saved on this device/i.test(t));
+    assert("a localStorage QuotaExceededError during connect is NOT reported as a Google Drive problem",
+      t.indexOf("reach Google Drive")===-1);
+    assert("...it says browser storage is full instead",
+      /storage/i.test(t) && /full/i.test(t));
+    H.resetState();
+
+    if (typeof H.driveHttpError!=="function" || typeof H.describeSyncError!=="function" ||
+        typeof H.storageUsageReport!=="function") {
+      assert("driveHttpError + describeSyncError + storageUsageReport are exposed (fail-first guard)", false);
+      return;
+    }
+
+    // --- (b) driveHttpError reads status + reason + message from the body
+    function fakeRes(status,body,jsonThrows){
+      return { status:status, ok:false, json:function(){
+        return jsonThrows?Promise.reject(new Error("not json")):Promise.resolve(body);
+      }};
+    }
+    var e1=await H.driveHttpError("read",fakeRes(403,{error:{code:403,message:"Rate Limit Exceeded",
+      errors:[{domain:"usageLimits",reason:"rateLimitExceeded",message:"Rate Limit Exceeded"}]}}));
+    assert("driveHttpError: carries HTTP status", e1.status===403);
+    assert("driveHttpError: carries error.errors[0].reason", e1.reason==="rateLimitExceeded");
+    assert("driveHttpError: carries Drive's own message", e1.driveMessage==="Rate Limit Exceeded");
+    assert("driveHttpError: message names op, status and reason so a toast is diagnosable",
+      /read/.test(e1.message) && /403/.test(e1.message) && /rateLimitExceeded/.test(e1.message));
+
+    var e2=await H.driveHttpError("update",fakeRes(403,{error:{code:403,message:"The user's Drive storage quota has been exceeded.",
+      errors:[{reason:"storageQuotaExceeded"}]}}));
+    assert("driveHttpError: tells storageQuotaExceeded apart from rateLimitExceeded", e2.reason==="storageQuotaExceeded" && e2.reason!==e1.reason);
+
+    var e3=await H.driveHttpError("list",fakeRes(429,{error:{code:429,message:"Too Many",status:"RESOURCE_EXHAUSTED"}}));
+    assert("driveHttpError: falls back to error.status when errors[] is absent", e3.reason==="RESOURCE_EXHAUSTED" && e3.status===429);
+
+    var e4=await H.driveHttpError("list",fakeRes(500,null,true));
+    assert("driveHttpError: an unreadable/non-JSON body still yields an error with the status and no reason",
+      e4.status===500 && e4.reason==="" && /500/.test(e4.message));
+
+    // --- describeSyncError: what the toast says
+    var dq=new w.DOMException("The quota has been exceeded.","QuotaExceededError");
+    var msgQ=H.describeSyncError(dq);
+    assert("describeSyncError: QuotaExceededError -> browser storage, not Google Drive",
+      /storage/i.test(msgQ) && msgQ.indexOf("reach Google Drive")===-1);
+    var msgD=H.describeSyncError(e1);
+    assert("describeSyncError: a Drive error keeps the Drive wording AND shows the reason",
+      /Google Drive/.test(msgD) && /rateLimitExceeded/.test(msgD));
+    assert("describeSyncError: an unknown error still shows its message",
+      /boom/.test(H.describeSyncError(new Error("boom"))));
+
+    // --- storageUsageReport: what is eating the origin's quota
+    var ls=w.localStorage;
+    ls.setItem("zz-test-big-key","x".repeat(50000));
+    ls.setItem("zz-test-small-key","y");
+    var rep=H.storageUsageReport();
+    ls.removeItem("zz-test-big-key"); ls.removeItem("zz-test-small-key");
+    assert("storageUsageReport: lists the biggest key first with its size",
+      rep.top.length>0 && rep.top[0].key==="zz-test-big-key" && rep.top[0].chars>=50000);
+    assert("storageUsageReport: total covers at least the planted keys", rep.totalChars>=50001);
+  })();
+
+
+  /* 99. (2026-10-04) Token expiry + rate-limit handling in syncNow. Before
+     this, an expired/revoked token and a rate limit were the same silent
+     "console.error and carry on" - the app kept firing requests with a dead
+     token, and a rate-limited device re-hit Drive on every save. Now:
+       - 401 (or a token past its known expiry) = token problem -> drop the
+         token, land in the existing "needs reconnect" state (tap-anywhere
+         reconnect picks it up), no further requests with the dead token;
+       - rate limit / 5xx = NOT a token problem -> keep the token, back off
+         with a single scheduled retry, never hammer;
+       - one sync in flight at a time;
+       - local writes happen before the network, and a local-storage failure
+         never blocks the push of what was merged. */
+  await (async function(){
+    var w=d.defaultView;
+    var AUTH={status:401,body:{error:{code:401,message:"Invalid Credentials",errors:[{reason:"authError"}]}}};
+    var RATE={status:403,body:{error:{code:403,message:"User Rate Limit Exceeded",errors:[{reason:"userRateLimitExceeded"}]}}};
+    function statusLabel(){ return d.getElementById("syncStatus").querySelector(".label").textContent; }
+    function toastText(){ return d.getElementById("toast").querySelector(".msg").textContent; }
+    // The toast element keeps its last text after it dismisses, so a check
+    // that reads it must start from blank or it can pass on a STALE message
+    // from an earlier test (caught here: two checks passed vacuously).
+    function clearToast(){ d.getElementById("toast").querySelector(".msg").textContent=""; }
+    function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+    var LEDGER_KEY="money-ledger-v1-TESTMODE";
+    // A connected device whose Drive file exists and whose call log is clean.
+    async function connected(){
+      H.resetState(); H.setView(2026,9);
+      var s=H.getState(); s.settings.currency="DKK"; H.setState(s);
+      H.testConnectDrive(null);
+      H.saveDriveTokenCache("tok",3600);
+      var id=await H.resolveDriveFileId();
+      H.resetFakeDriveCalls();
+      return id;
+    }
+    function noInterleave(calls){
+      for(var i=1;i<calls.length;i++) if(calls[i]==="read" && calls[i-1]==="read") return false;
+      return true;
+    }
+    var gisSaved=w.google;
+
+    // ---- control: a healthy sync keeps the token and makes exactly read+update
+    await connected();
+    await H.syncNow(false);
+    assert("control: a healthy sync makes exactly one read then one update",
+      H.getFakeDriveCalls().join()==="read,update");
+    assert("control: a healthy sync leaves the token in place", H.getDriveAccessToken()==="fake-token");
+
+    // ---- 401 on read -> token problem
+    await connected();
+    H.setFakeDriveFailure(AUTH);
+    clearToast();
+    await H.syncNow(false);
+    assert("401 on read: the dead token is dropped (no more requests with it)", H.getDriveAccessToken()===null);
+    assert("401 on read: the cached token is cleared too, so a reload doesn't resurrect it",
+      H.pageLoadSyncPlan()==="await-user-reconnect");
+    assert("401 on read: Settings shows the existing needs-reconnect state, not 'Synced to Drive'",
+      /needs reconnect/i.test(statusLabel()));
+    assert("401 on read: the user is told (a lapse during a background sync must not be silent)",
+      /reconnect/i.test(toastText()));
+    w.google={accounts:{oauth2:{}}};
+    assert("401 on read: the next tap anywhere now resolves to a reconnect (the existing tap-anywhere path)",
+      H.resolveGestureReconnect(null)==="reconnecting");
+    w.google=gisSaved;
+    H.setFakeDriveFailure(null);
+    H.resetFakeDriveCalls();
+    await H.syncNow(false);
+    assert("after a lapse, further syncNow calls make zero requests until reconnect", H.getFakeDriveCalls().length===0);
+
+    // ---- 401 on the push half (read succeeded) is the same token problem
+    await connected();
+    H.setFakeDriveFailure(Object.assign({ops:["update"]},AUTH));
+    await H.syncNow(false);
+    assert("401 on update: also drops the token", H.getDriveAccessToken()===null && /needs reconnect/i.test(statusLabel()));
+
+    // ---- rate limit is NOT a token problem, and must not be hammered
+    await connected();
+    H.setFakeDriveFailure(RATE);
+    await H.syncNow(false);
+    assert("rate limit: the token is kept (it's valid; waiting fixes this, reconnecting wouldn't)",
+      H.getDriveAccessToken()==="fake-token" && !/needs reconnect/i.test(statusLabel()));
+    var afterFirst=H.getFakeDriveCalls().length;
+    await H.syncNow(false); await H.syncNow(false); await H.syncNow(false);
+    assert("rate limit: three more saves/syncs during the back-off make ZERO further Drive requests",
+      afterFirst===1 && H.getFakeDriveCalls().length===1);
+
+    // ---- one sync in flight at a time
+    await connected();
+    await Promise.all([H.syncNow(false),H.syncNow(false)]);
+    var order=H.getFakeDriveCalls();
+    assert("two syncNow calls started together never interleave their requests (one in flight)",
+      noInterleave(order) && order[0]==="read" && order[1]==="update");
+    assert("...and the second is not dropped: it runs after the first, so a later edit still syncs",
+      order.join()==="read,update,read,update");
+
+    // ---- local-first: a failed push must not cost the merged data
+    var idA=await connected();
+    var remoteRec=rec({id:"remote-1",categoryId:"seed-groceries",updatedBy:"device-B",updatedAt:"2026-10-01T10:00:00.000Z"});
+    H.getFakeDrive()[idA].content=JSON.stringify({entries:[remoteRec],categories:[],recurring:[],settings:{}});
+    H.setFakeDriveFailure(Object.assign({ops:["update"]},RATE));
+    await H.syncNow(false);
+    assert("local-first: when the push fails, the record merged from Drive is already in localStorage",
+      (w.localStorage.getItem(LEDGER_KEY)||"").indexOf("remote-1")!==-1);
+
+    // ---- local storage full during sync: still push what was merged
+    var idB=await connected();
+    H.getFakeDrive()[idB].content=JSON.stringify({entries:[rec({id:"remote-2",categoryId:"seed-groceries",updatedBy:"device-B",updatedAt:"2026-10-01T10:00:00.000Z"})],categories:[],recurring:[],settings:{}});
+    var realSet=w.Storage.prototype.setItem, threw=0;
+    w.Storage.prototype.setItem=function(k){
+      if(String(k).indexOf("money-ledger-v1")===0){ threw++; throw new w.DOMException("The quota has been exceeded.","QuotaExceededError"); }
+      return realSet.apply(this,arguments);
+    };
+    var syncThrew=false;
+    clearToast();
+    try{ await H.syncNow(true); } catch(e){ syncThrew=true; } finally { w.Storage.prototype.setItem=realSet; }
+    assert("setup sanity: the simulated local overflow fired during syncNow", threw>=1);
+    assert("local storage full during sync: syncNow does not blow up", syncThrew===false);
+    assert("local storage full during sync: the merged data is still pushed to Drive (Drive stays a superset)",
+      H.getFakeDriveCalls().indexOf("update")!==-1);
+    assert("local storage full during sync: the user is told it's browser storage", /storage/i.test(toastText()));
+
+    // ---- saveState itself on a full origin: no crash, and an honest message
+    H.resetState(); H.setView(2026,9);
+    var sx=H.getState(); sx.settings.currency="DKK"; H.setState(sx);
+    w.Storage.prototype.setItem=function(k){
+      if(String(k).indexOf("money-ledger-v1")===0) throw new w.DOMException("The quota has been exceeded.","QuotaExceededError");
+      return realSet.apply(this,arguments);
+    };
+    var saveThrew=false;
+    clearToast();
+    try{ H.saveState(); } catch(e){ saveThrew=true; } finally { w.Storage.prototype.setItem=realSet; }
+    assert("saveState on a full origin does not throw out of the UI handler", saveThrew===false);
+    assert("saveState on a full origin tells the user nothing more can be saved", /storage/i.test(toastText()) && /full/i.test(toastText()));
+
+    // ---- guarded: pure helpers + expiry + timer-driven retry
+    if (typeof H.classifySyncError!=="function" || typeof H.tokenIsLapsed!=="function" ||
+        typeof H.nextBackoffMs!=="function" || typeof H.setDriveTokenExpiresAt!=="function" ||
+        typeof H.setDriveBackoffBaseMs!=="function" || typeof H.getDriveBackoffUntil!=="function" ||
+        typeof H.checkTokenLapse!=="function") {
+      assert("classifySyncError/tokenIsLapsed/nextBackoffMs/expiry+backoff knobs are exposed (fail-first guard)", false);
+      H.resetState();
+      return;
+    }
+    function derr(status,reason){ var e=new Error("drive-x-"+status); e.driveOp="x"; e.status=status; e.reason=reason||""; return e; }
+    assert("classify: 401 -> auth", H.classifySyncError(derr(401,"authError"))==="auth");
+    assert("classify: 403 userRateLimitExceeded -> backoff", H.classifySyncError(derr(403,"userRateLimitExceeded"))==="backoff");
+    assert("classify: 403 rateLimitExceeded -> backoff", H.classifySyncError(derr(403,"rateLimitExceeded"))==="backoff");
+    assert("classify: 429 -> backoff", H.classifySyncError(derr(429,""))==="backoff");
+    assert("classify: 503 -> backoff (transient server error)", H.classifySyncError(derr(503,"backendError"))==="backoff");
+    assert("classify: 403 storageQuotaExceeded (Drive itself full) is NOT a rate limit or auth problem",
+      H.classifySyncError(derr(403,"storageQuotaExceeded"))==="other");
+    assert("classify: 404 -> other", H.classifySyncError(derr(404,"notFound"))==="other");
+    assert("classify: local QuotaExceededError -> storage (never auth, never backoff)",
+      H.classifySyncError(new w.DOMException("x","QuotaExceededError"))==="storage");
+    assert("classify: a plain Error -> other", H.classifySyncError(new Error("boom"))==="other");
+
+    var NOW=1000000, MARGIN=60000;
+    assert("tokenIsLapsed: unknown expiry (null) is never lapsed", H.tokenIsLapsed(null,NOW)===false);
+    assert("tokenIsLapsed: well before expiry -> live", H.tokenIsLapsed(NOW+10*MARGIN,NOW)===false);
+    assert("tokenIsLapsed: inside the safety margin counts as lapsed (same margin as the cache)", H.tokenIsLapsed(NOW+MARGIN-1,NOW)===true);
+    assert("tokenIsLapsed: already past expiry -> lapsed", H.tokenIsLapsed(NOW-1,NOW)===true);
+
+    assert("nextBackoffMs: doubles each step from the base", H.nextBackoffMs(0,30000)===30000 && H.nextBackoffMs(1,30000)===60000 && H.nextBackoffMs(2,30000)===120000);
+    assert("nextBackoffMs: capped (never an hour-long silent stall, never unbounded)", H.nextBackoffMs(20,30000)<=600000);
+
+    // expiry preflight: a token we KNOW is expired must not be sent to Drive at all
+    await connected();
+    H.setDriveTokenExpiresAt(Date.now()-5000);
+    await H.syncNow(false);
+    assert("expired token: syncNow makes zero requests and lands in needs-reconnect",
+      H.getFakeDriveCalls().length===0 && H.getDriveAccessToken()===null && /needs reconnect/i.test(statusLabel()));
+    await connected();
+    H.setDriveTokenExpiresAt(Date.now()+3600000);
+    await H.syncNow(false);
+    assert("live token with a known future expiry: syncs normally", H.getFakeDriveCalls().join()==="read,update");
+
+    // refocus check (HL's tab-refocus pattern): surfaces a lapse without waiting for a save
+    await connected();
+    H.setDriveTokenExpiresAt(Date.now()+3600000);
+    H.checkTokenLapse();
+    assert("checkTokenLapse: live token -> no-op", H.getDriveAccessToken()==="fake-token");
+    H.setDriveTokenExpiresAt(Date.now()-1);
+    H.checkTokenLapse();
+    assert("checkTokenLapse: expired token -> needs-reconnect state, no network", H.getDriveAccessToken()===null && H.getFakeDriveCalls().length===0);
+
+    // timer-driven retry: backs off, then retries by itself, then resets
+    await connected();
+    H.setDriveBackoffBaseMs(20);
+    H.setFakeDriveFailure(RATE);
+    await H.syncNow(false);
+    assert("rate limit: a back-off window is now open", H.getDriveBackoffUntil()>Date.now()-1);
+    H.setFakeDriveFailure(null);
+    H.resetFakeDriveCalls();
+    await sleep(250);
+    assert("rate limit: the single scheduled retry fired by itself once the window passed (no hammering, but not forgotten)",
+      H.getFakeDriveCalls().join()==="read,update");
+    assert("rate limit: a successful retry closes the back-off window", H.getDriveBackoffUntil()===0);
+    H.setDriveBackoffBaseMs(30000);
+
+    H.resetState();
+  })();
+
+
+  /* 100. (2026-10-04) A failed LOCAL write: what happens to the entry, and
+     hard rule 6. When localStorage is full, saveState cannot persist. The
+     entry then exists in memory only (and on Drive, if connected, because
+     the debounced push still runs), and the toast must say plainly that it
+     is NOT saved on this device. Separately: a failed local write must never
+     cause any record (id) to disappear on either side. */
+  await (async function(){
+    var w=d.defaultView;
+    var LEDGER_KEY="money-ledger-v1-TESTMODE";
+    function toastText(){ return d.getElementById("toast").querySelector(".msg").textContent; }
+    function clearToast(){ d.getElementById("toast").querySelector(".msg").textContent=""; }
+    var realSet=w.Storage.prototype.setItem, fired=0;
+    function overflowOn(){
+      fired=0;
+      w.Storage.prototype.setItem=function(k){
+        if(String(k).indexOf("money-ledger-v1")===0){ fired++; throw new w.DOMException("The quota has been exceeded.","QuotaExceededError"); }
+        return realSet.apply(this,arguments);
+      };
+    }
+    function overflowOff(){ w.Storage.prototype.setItem=realSet; }
+    function ids(arr){ return arr.map(function(r){ return r.id; }); }
+    function driveIds(fileId,key){ return ids(JSON.parse(H.getFakeDrive()[fileId].content)[key]); }
+
+    // --- the entry itself: memory yes, disk no, and the toast says so
+    H.resetState(); H.setView(2026,9);
+    var s=H.getState(); s.settings.currency="DKK"; H.setState(s);
+    var e=H.createEntry({date:"2026-10-04",amountMinor:12345,direction:"expense",categoryId:"seed-groceries",note:"unsaved-one"});
+    clearToast(); overflowOn();
+    try{ H.saveState(); } finally { overflowOff(); }
+    assert("setup sanity: the simulated overflow fired on the entry's save", fired>=1);
+    assert("failed local write: the entry is still in memory (the app keeps working this session)",
+      H.getState().entries.some(function(x){ return x.id===e.id && !x.deleted; }));
+    assert("failed local write: the entry is NOT in localStorage",
+      (w.localStorage.getItem(LEDGER_KEY)||"").indexOf(e.id)===-1);
+    var tt=toastText();
+    assert("failed local write: the toast says it is not saved on this device", /not saved on this device/i.test(tt));
+    assert("failed local write: the toast says why (browser storage full)", /storage/i.test(tt) && /full/i.test(tt));
+    assert("failed local write: the toast says it will be lost on close/reload", /lost/i.test(tt));
+
+    // --- hard rule 6: no id may vanish on either side because a local write failed
+    var DRV=function(){ return H.getFakeDrive(); };
+    H.resetState(); H.setView(2026,9);
+    var s2=H.getState(); s2.settings.currency="DKK"; H.setState(s2);
+    H.testConnectDrive(null);
+    var fileId=await H.resolveDriveFileId();
+    var remoteOnly=rec({id:"remote-only",categoryId:"seed-groceries",updatedBy:"device-B",updatedAt:"2026-10-01T10:00:00.000Z"});
+    var remoteLive=rec({id:"will-be-deleted-here",categoryId:"seed-groceries",updatedBy:"device-B",updatedAt:"2026-10-01T10:00:00.000Z"});
+    DRV()[fileId].content=JSON.stringify({entries:[remoteOnly,remoteLive],categories:[],recurring:[],settings:{}});
+    // local: a brand-new entry, plus a local tombstone of a record Drive still has live
+    var st=H.getState();
+    var localNew=H.createEntry({date:"2026-10-04",amountMinor:500,direction:"expense",categoryId:"seed-groceries",note:"local-new"});
+    st.entries.push(rec({id:"will-be-deleted-here",categoryId:"seed-groceries",updatedBy:H.getDeviceId(),
+      updatedAt:"2026-10-02T10:00:00.000Z",deleted:true,deletedAt:"2026-10-02T10:00:00.000Z"}));
+    var before={ local:["remote-only","will-be-deleted-here",localNew.id] };
+    overflowOn();
+    try{
+      H.saveState();               // local write fails here...
+      await H.syncNow(false);      // ...and again inside the sync merge
+    } finally { overflowOff(); }
+    assert("rule 6 setup sanity: local writes really failed during both saveState and syncNow", fired>=2);
+    var memIds=ids(H.getState().entries), drvIds=driveIds(fileId,"entries");
+    before.local.forEach(function(id){
+      assert("rule 6: '"+id+"' still exists in memory after failed local writes", memIds.indexOf(id)!==-1);
+      assert("rule 6: '"+id+"' still exists on Drive after failed local writes (superset pushed, nothing dropped)", drvIds.indexOf(id)!==-1);
+    });
+    var tomb=JSON.parse(DRV()[fileId].content).entries.filter(function(r){ return r.id==="will-be-deleted-here"; })[0];
+    assert("rule 6: the local delete reached Drive as a tombstone (record kept, marked deleted), not as a removal",
+      tomb && tomb.deleted===true);
+    H.resetState();
+  })();
+
+  /* 101. (2026-10-04) Cache-busting: index.html loads style.css and app.js
+     with a ?v= token so a phone cannot serve a stale cached script next to
+     a fresh index.html. The two tags must carry the SAME non-empty token
+     (bumped together by hand on every deploy, see CLAUDE.md), or one asset
+     can still go stale. */
+  await (async function(){
+    var html=await (await fetch("index.html?cb="+Date.now())).text();
+    var css=/href="style\.css\?v=([^"]+)"/.exec(html);
+    var js=/src="app\.js\?v=([^"]+)"/.exec(html);
+    assert("index.html: style.css has a ?v= token", !!css);
+    assert("index.html: app.js has a ?v= token", !!js);
+    assert("index.html: both ?v= tokens match", !!css && !!js && css[1]===js[1]);
+  })();
+
   return results;
 }
 })();
