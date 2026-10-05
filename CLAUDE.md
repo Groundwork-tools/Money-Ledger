@@ -1253,7 +1253,7 @@ Diagnosed rather than assumed:
 - **Cache-busting.** `index.html` loads `style.css?v=TOKEN` and
   `app.js?v=TOKEN` so a phone cannot serve a stale cached script beside a
   fresh page (the 2026-08-12 gotcha). TOKEN is a hand-bumped string (current:
-  `20261004c`), not a commit hash, because a commit cannot contain its own
+  `20261004d`), not a commit hash, because a commit cannot contain its own
   hash and there is no build step to inject one. **On every deploy that
   changes `app.js` or `style.css`, change TOKEN in BOTH tags** (date plus a
   letter, e.g. `20261015a`). A self-test fails if the two tokens differ or
@@ -1402,17 +1402,26 @@ reasoning:
   empty state.
 - **Neutral ink fill for All, never a category colour, never red.** All is
   not one category, so no category's colour should speak for it.
-- **Desktop cap.** At 1280px the bar track stretched to about 990px (more on
-  a wider screen). The list is capped at 720px (track about 470px). A
-  `max-width` only bites when the screen is wider than the cap, so the phone
-  layout is unchanged by construction; measured before and after in the same
-  scenario: track 60.8 / 100.8 / 130.8px at 320 / 360 / 390 identical, and
-  now pinned by a test, 709px at 1000px and 989px at 1280px both became 469px.
-  Chosen over capping only the track (which would leave the figure stranded
-  at the far edge of a wide box). The hint line and the switcher box above
-  stay full width.
+- **Desktop cap: added, then REVERSED the same day.** At 1280px the bar track
+  stretched to about 990px (more on a wider screen), which I flagged and
+  Sebastian asked to cap; the list was capped at 720px (track about 470px).
+  Seeing it, he said the Trends line should expand the whole screen: the
+  capped box ended well short of the full-width switcher box and header rule
+  above it, which read as unfinished. Asked which of three layouts he wanted
+  (full width with bars filling; full-width box with capped bars and the
+  figure beside the bar; same with the figure at the far right) and he chose
+  **full width, bars fill the row**. So the cap was removed entirely and the
+  list spans the page like the Budget and Recurring screens. Accepted
+  trade-off, stated plainly: on a very wide monitor a bar can be 1600px or
+  more, which is the thing the cap was meant to prevent. If that ever
+  bothers in daily use, reopen it as a new decision (the capped-bar,
+  figure-beside-the-bar layout was the runner-up). Geometry is now identical
+  to before the cap at every width measured (track 60.8 / 100.8 / 130.8 /
+  708.9 / 988.9px at 320 / 360 / 390 / 1000 / 1280). Block 107 pins it: the
+  list is exactly as wide as the switcher box and the tracks fill it, and
+  reintroducing a cap (720px or a looser 1100px) fails it.
 - **Verification.** Blocks 104 (updated for the new default), 105 (also 390px),
-  106 (All) and 107 (cap, plus phone widths pinned). Fail-first run: 4
+  106 (All) and 107 (row width, plus phone widths pinned). Fail-first run: 4
   failing (two guards, two cap checks with real numbers), then 1 failing
   (my own ink-colour assertion compared an inline `var(--ink)` to an rgb
   value; fixed to compare the computed colour), then 0. Twelve single-
@@ -1932,9 +1941,9 @@ ledger-paper plainness *is* the trust signal.
    - Expense and income stay separate, using the same Spent/Income toggle
      as the rest of the app.
    - **Added 2026-10-04, after first use: an "All" option, first in the
-     switcher and the DEFAULT, plus a desktop cap on the bar track.** Full
-     reasoning under "General fixes (2026-10-04, Trends: All and the desktop
-     cap)".
+     switcher and the DEFAULT.** A desktop cap on the bar track was added and
+     then reversed the same day (rows span the full width). Full reasoning
+     under "General fixes (2026-10-04, Trends: All and the desktop cap)".
 
    **Cut, deliberately:** tooltips; gridlines and axis ticks; a budget
    overlay line (`budgetMinor` is today's value, not a per-month value, so

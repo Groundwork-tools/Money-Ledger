@@ -196,11 +196,6 @@ button{cursor:pointer}
    colour (set inline) and never red: red on this app means over-budget. */
 .trendsview{margin-top:18px}
 .trends-items-label{margin-top:26px}
-/* Desktop cap: at 1280px the bar track stretched to ~990px (more on a wider
-   screen), too long to read against a figure at the far edge. Capping the list
-   caps the track (about 500px). A max-width only bites when the screen is
-   wider than the cap, so the phone layout is untouched by construction. */
-.trends-list{max-width:720px}
 /* ONE shared number-column width for the whole list (--tr-numw, set in JS from
    the longest figure, in ch of this row's own mono font). An `auto` column let
    a short figure leave a longer bar track than a long one, so bars scaled to

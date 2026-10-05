@@ -3573,14 +3573,16 @@ async function runTests(H,d){
     H.resetState();
   })();
 
-  /* 107. (2026-10-04) Desktop cap on the bar track. At 1280px the track
-     stretched to ~989px (about 1600px on a larger screen) and a bar that long
-     is hard to read against a figure at the far edge. The list is capped, so
-     the track stops growing; the phone layout is untouched because a
-     max-width only bites when the screen is wider than the cap. The phone
-     track widths (60.8 / 100.8 / 130.8px at 320 / 360 / 390 in this exact
-     scenario, measured before the change) are pinned to the same values so
-     "phone layout unchanged" is a test, not a claim. */
+  /* 107. (2026-10-04) Trends row width. History: a 720px cap on the list was
+     added (the track stretched to ~990px at 1280) and then REVERSED the same
+     day on Sebastian's call: the capped box looked narrower than the full-
+     width panels above it, so the rows now span the whole page like Budget
+     and Recurring, accepting long bars on very wide screens. This block pins
+     the final behaviour: on desktop the list is exactly as wide as the
+     switcher box above it and the tracks fill it (all equal length). The
+     phone track widths (60.8 / 100.8 / 130.8px at 320 / 360 / 390 in this
+     exact scenario, measured before either change) stay pinned so "phone
+     layout unchanged" is a test, not a claim. */
   await (async function(){
     var CASES=[[320,60.8],[360,100.8],[390,130.8],[1000,null],[1280,null]];
     for (var ci=0; ci<CASES.length; ci++){
@@ -3600,19 +3602,22 @@ async function runTests(H,d){
       FH.renderAll(); FH.showTrendsView(true);
       await new Promise(function(r){ setTimeout(r,250); });
       var tr=[].slice.call(fd.querySelectorAll("#trendsList .tr-bar")).map(function(x){ return x.getBoundingClientRect().width; });
-      assert("cap @"+W+"px: setup sanity: the frame has layout and 6 tracks rendered", tr.length===6 && tr.every(function(x){ return x>0; }));
+      assert("width @"+W+"px: setup sanity: the frame has layout and 6 tracks rendered", tr.length===6 && tr.every(function(x){ return x>0; }));
       var spread=Math.max.apply(null,tr)-Math.min.apply(null,tr);
       if (expectTrack!==null){
-        assert("cap @"+W+"px: phone layout unchanged: the track is still "+expectTrack+"px (+-0.5), same as before the cap"+
+        assert("width @"+W+"px: phone layout unchanged: the track is still "+expectTrack+"px (+-0.5), same as before the cap"+
           (Math.abs(tr[0]-expectTrack)<=0.5?"":" [now "+tr[0].toFixed(1)+"]"), Math.abs(tr[0]-expectTrack)<=0.5 && spread<=0.5);
       } else {
-        assert("cap @"+W+"px: desktop bar track is capped at 520px or less"+(Math.max.apply(null,tr)<=520?"":" [now "+Math.max.apply(null,tr).toFixed(1)+"]"),
-          Math.max.apply(null,tr)<=520);
-        assert("cap @"+W+"px: desktop tracks are still all the same length", spread<=0.5);
-        assert("cap @"+W+"px: the capped track is still generous (over 300px)", Math.min.apply(null,tr)>300);
+        var box=fd.querySelector("#trendsView .quickadd").getBoundingClientRect();
+        var listBox=fd.getElementById("trendsList").getBoundingClientRect();
+        assert("width @"+W+"px: the list is exactly as wide as the switcher box above it (full width, not capped)"+
+          (Math.abs(listBox.width-box.width)<=1?"":" [list "+listBox.width.toFixed(1)+" vs box "+box.width.toFixed(1)+"]"),
+          Math.abs(listBox.width-box.width)<=1 && Math.abs(listBox.left-box.left)<=1);
+        assert("width @"+W+"px: desktop tracks are all the same length", spread<=0.5);
+        assert("width @"+W+"px: the bars fill the wider row (track over 600px)"+(Math.min.apply(null,tr)>600?"":" [now "+Math.min.apply(null,tr).toFixed(1)+"]"), Math.min.apply(null,tr)>600);
         var list=fd.getElementById("trendsList").getBoundingClientRect();
         var overflow=[].slice.call(fd.querySelectorAll("#trendsList .tr-num")).some(function(n){ return n.scrollWidth>n.clientWidth+0.5 || n.getBoundingClientRect().right>list.right+0.5; });
-        assert("cap @"+W+"px: the figures are not clipped or pushed out of the list", !overflow);
+        assert("width @"+W+"px: the figures are not clipped or pushed out of the list", !overflow);
       }
       f.remove();
     }
