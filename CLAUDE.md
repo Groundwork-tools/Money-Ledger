@@ -1253,7 +1253,7 @@ Diagnosed rather than assumed:
 - **Cache-busting.** `index.html` loads `style.css?v=TOKEN` and
   `app.js?v=TOKEN` so a phone cannot serve a stale cached script beside a
   fresh page (the 2026-08-12 gotcha). TOKEN is a hand-bumped string (current:
-  `20261004d`), not a commit hash, because a commit cannot contain its own
+  `20261010a`), not a commit hash, because a commit cannot contain its own
   hash and there is no build step to inject one. **On every deploy that
   changes `app.js` or `style.css`, change TOKEN in BOTH tags** (date plus a
   letter, e.g. `20261015a`). A self-test fails if the two tokens differ or
@@ -2015,6 +2015,37 @@ Do not add features that are not on this list without discussing them first.
     served files against local. This satisfies the privacy-policy-page
     dependency for the brand-verification path above — still not submitted,
     but no longer blocked on this piece.
+## General fixes (2026-10-10, a full localStorage)
+
+Hours Ledger and Money Ledger share one origin and therefore one ~5 MB
+localStorage quota on GitHub Pages; a real phone filled it (mostly Hours
+Ledger's undo history), and Money Ledger could no longer save. Branch
+`investigate/quota-full`, not merged.
+
+- **A failed save never shows a success message for an entry.** Found by
+  recording every text the toast was set to: with Drive NOT connected,
+  `saveState()` sets "Not saved on this device..." and the handler sets
+  "Expense logged" in the same tick, so only the success text is ever
+  painted. With Drive connected the order is "Expense logged", then
+  "Not saved..." 1.2 s later (the debounced sync's own failed write), which
+  is what a phone with sync on shows. `saveState()` now returns whether the
+  write landed (`lastSaveOk`) and the entry toasts (quick-add, edit, delete
+  with its Undo, automatic recurring entries) go through `toastIfSaved()`.
+  Not changed: success toasts for categories, recurring items, import and
+  clear - same shape, not part of this fix.
+- **A new install on a full origin still starts.** `money-ledger-device-id`
+  was written unguarded at load (and again by `loadState()` on a first
+  install); a full origin threw out of the script before anything rendered.
+  `persistDeviceId()` swallows only `QuotaExceededError`; the id then lasts
+  one page load (the next load makes another, as for any device with no
+  stored identity). Limit: an existing install already has the key, so this
+  protects new installs and installs whose key was evicted, not the phone
+  that reported the bug.
+- Tests: `money-ledger-selftest.html` (611), new frame
+  `money-ledger-quota-frame.html` for the load-time case. Fail-first: 7 and
+  2. Not tested: the rethrow of a non-quota error in `persistDeviceId()`
+  (read only).
+
 - GitHub Gist was considered and rejected as the sync target over Google
   Drive: a "secret" gist is unlisted, not access-controlled — anyone with
   the URL can read it. Worth revisiting only if a stronger case for it shows

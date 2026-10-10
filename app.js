@@ -192,10 +192,23 @@ function saveState() {
 // Declared before loadState() runs below — defaultState()'s seed
 // categories need it.
 const DEVICE_ID_KEY = "money-ledger-device-id" + (TEST_MODE ? "-TESTMODE" : "");
+// A full origin refuses even this tiny write. Unguarded, the exception left the
+// whole script at load: nothing rendered, no handler was wired, and the person
+// could not even read their ledger (reproduced: a NEW install, or one whose
+// device-id key was evicted, on a full origin). The id then lives for this page
+// load only; the next load makes another one, which is exactly what a device
+// with no stored identity is.
+function persistDeviceId() {
+  try {
+    localStorage.setItem(DEVICE_ID_KEY, DEVICE_ID);
+  } catch (err) {
+    if (!(err && err.name === "QuotaExceededError")) throw err;
+  }
+}
 let DEVICE_ID = localStorage.getItem(DEVICE_ID_KEY);
 if (!DEVICE_ID) {
   DEVICE_ID = uid();
-  localStorage.setItem(DEVICE_ID_KEY, DEVICE_ID);
+  persistDeviceId();
 }
 
 // Called by loadState() whenever it falls back to defaultState() (missing
@@ -205,7 +218,7 @@ if (!DEVICE_ID) {
 // delete. See CLAUDE.md "seed category resurrection".
 function regenerateDeviceId() {
   DEVICE_ID = uid();
-  localStorage.setItem(DEVICE_ID_KEY, DEVICE_ID);
+  persistDeviceId();
 }
 
 let state = loadState();

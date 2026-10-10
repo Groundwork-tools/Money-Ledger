@@ -2843,6 +2843,23 @@ async function runTests(H,d){
     assert("[control] Drive connected: 1.4s later the toast still says the save failed", /not saved/i.test(tAdd2Late), "toast='"+tAdd2Late.slice(0,70)+"'");
     H.resetState();
 
+    // ---- (b) 2026-10-10: a NEW install on a full origin must still start. money-ledger-device-id is written
+    // at load (and again by loadState on a first install); an unguarded setItem threw out of the whole script
+    // before __ML_TEST__ existed / anything rendered.
+    var devKey="money-ledger-device-id-TESTMODE", keepDev=w.localStorage.getItem(devKey), keepLedger=w.localStorage.getItem(LEDGER_KEY);
+    w.localStorage.removeItem(devKey); w.localStorage.removeItem(LEDGER_KEY);
+    window.__quotaSeed={on:true,limit:0};
+    var fr=document.createElement("iframe"); fr.style.display="none";
+    fr.src="money-ledger-quota-frame.html?mltest=1&cb="+Date.now(); document.body.appendChild(fr);
+    for(var tries=0; tries<150 && !(fr.contentWindow.__ML_TEST__ && fr.contentDocument.readyState==="complete"); tries++) await sleep(40);
+    var started=!!fr.contentWindow.__ML_TEST__, optionCount=started?fr.contentDocument.getElementById("qaCategory").options.length:0;
+    var throwsSeen=fr.contentWindow.__quotaThrows;
+    assert("setup sanity (b): the frame's quota really refused writes at load", throwsSeen>=1, "refused writes="+throwsSeen);
+    assert("(b) new install on a full origin: the app starts (__ML_TEST__ exists)", started);
+    assert("(b) ...and renders (the quick-add category list is populated)", optionCount>0, "options="+optionCount);
+    fr.remove(); window.__quotaSeed=null;
+    if(keepDev!==null) w.localStorage.setItem(devKey,keepDev);
+    if(keepLedger!==null) w.localStorage.setItem(LEDGER_KEY,keepLedger);
 
     // ---- guarded: pure helpers + expiry + timer-driven retry
     if (typeof H.classifySyncError!=="function" || typeof H.tokenIsLapsed!=="function" ||
