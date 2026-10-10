@@ -2777,6 +2777,28 @@ async function runTests(H,d){
     assert("saveState on a full origin does not throw out of the UI handler", saveThrew===false);
     assert("saveState on a full origin tells the user nothing more can be saved", /storage/i.test(toastText()) && /full/i.test(toastText()));
 
+    // ---- (quota investigation, 2026-10-10) an EDIT whose local save fails still reaches Drive.
+    // The sync tests above start from a record already on Drive; this one starts from the
+    // user's own edit: createEntry + saveState on a full origin, then the debounced push.
+    // Written to fail if saveState ever stops scheduling the push after a quota error.
+    // Passes today (control), same as Hours Ledger's Q1 row.
+    var idQ=await connected();
+    w.Storage.prototype.setItem=function(k){
+      if(String(k).indexOf("money-ledger-v1")===0) throw new w.DOMException("The quota has been exceeded.","QuotaExceededError");
+      return realSet.apply(this,arguments);
+    };
+    clearToast();
+    try{
+      H.createEntry({id:"quota-edit-1",date:"2026-10-02",amountMinor:123,direction:"expense",categoryId:"seed-groceries",note:"Q1 edit"});
+      H.saveState();
+      await sleep(1700); // saveState's 1200ms push debounce, plus the sync itself
+    } finally { w.Storage.prototype.setItem=realSet; }
+    assert("setup sanity: the edit's local save really failed (not in localStorage)",
+      (w.localStorage.getItem(LEDGER_KEY)||"").indexOf("quota-edit-1")===-1);
+    var driveFile=H.getFakeDrive()[idQ];
+    assert("quota: an edit whose local save failed still reaches Drive (debounced push)",
+      !!driveFile && driveFile.content.indexOf("quota-edit-1")!==-1);
+
     // ---- guarded: pure helpers + expiry + timer-driven retry
     if (typeof H.classifySyncError!=="function" || typeof H.tokenIsLapsed!=="function" ||
         typeof H.nextBackoffMs!=="function" || typeof H.setDriveTokenExpiresAt!=="function" ||
