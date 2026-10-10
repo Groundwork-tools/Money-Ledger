@@ -152,11 +152,24 @@ function backfillRecordFields(record, fallbackUpdatedAt) {
   if (record.deletedAt === undefined) record.deletedAt = null;
 }
 
+// True when the most recent saveState() landed in localStorage. A success toast
+// for an entry ("Expense logged", "Entry updated"...) goes through
+// toastIfSaved() so it can never replace the "Not saved" warning saveState()
+// just showed: both are set in the same tick, so the second one used to win
+// before any frame painted and the person saw only the success text.
+let lastSaveOk = true;
+function toastIfSaved(msg, undoFn) {
+  if (lastSaveOk) toast(msg, undoFn);
+}
+
+// Returns whether the ledger was stored on this device.
 function saveState() {
   state.updatedAt = nowIso();
+  lastSaveOk = true;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch (err) {
+    lastSaveOk = false;
     // A full origin (GitHub Pages project sites share ONE ~5MB localStorage
     // with Hours Ledger) used to throw out of every handler with no message.
     // Still schedules the Drive push below: Drive can hold what this device
@@ -168,6 +181,7 @@ function saveState() {
     clearTimeout(saveState._drivePush);
     saveState._drivePush = setTimeout(() => syncNow(false), 1200);
   }
+  return lastSaveOk;
 }
 
 // Identifies this browser profile, not this ledger — deliberately kept out
@@ -178,10 +192,23 @@ function saveState() {
 // Declared before loadState() runs below — defaultState()'s seed
 // categories need it.
 const DEVICE_ID_KEY = "money-ledger-device-id" + (TEST_MODE ? "-TESTMODE" : "");
+// A full origin refuses even this tiny write. Unguarded, the exception left the
+// whole script at load: nothing rendered, no handler was wired, and the person
+// could not even read their ledger (reproduced: a NEW install, or one whose
+// device-id key was evicted, on a full origin). The id then lives for this page
+// load only; the next load makes another one, which is exactly what a device
+// with no stored identity is.
+function persistDeviceId() {
+  try {
+    localStorage.setItem(DEVICE_ID_KEY, DEVICE_ID);
+  } catch (err) {
+    if (!(err && err.name === "QuotaExceededError")) throw err;
+  }
+}
 let DEVICE_ID = localStorage.getItem(DEVICE_ID_KEY);
 if (!DEVICE_ID) {
   DEVICE_ID = uid();
-  localStorage.setItem(DEVICE_ID_KEY, DEVICE_ID);
+  persistDeviceId();
 }
 
 // Called by loadState() whenever it falls back to defaultState() (missing
@@ -191,7 +218,7 @@ if (!DEVICE_ID) {
 // delete. See CLAUDE.md "seed category resurrection".
 function regenerateDeviceId() {
   DEVICE_ID = uid();
-  localStorage.setItem(DEVICE_ID_KEY, DEVICE_ID);
+  persistDeviceId();
 }
 
 let state = loadState();
@@ -896,9 +923,9 @@ function applyDueRecurring() {
   const currency = state.settings.currency;
   saveState();
   if (inserted.length === 1) {
-    toast(`${inserted[0].note}, ${formatMoney(inserted[0].amountMinor, currency)} logged automatically`);
+    toastIfSaved(`${inserted[0].note}, ${formatMoney(inserted[0].amountMinor, currency)} logged automatically`);
   } else {
-    toast(`${inserted.length} recurring entries logged automatically`);
+    toastIfSaved(`${inserted.length} recurring entries logged automatically`);
   }
   renderAll();
 }
@@ -1033,7 +1060,7 @@ function initQuickAdd() {
     saveState();
     document.getElementById("qaAmount").value = "";
     document.getElementById("qaNote").value = "";
-    toast((quickDir === "income" ? "Income" : "Expense") + " logged");
+    toastIfSaved((quickDir === "income" ? "Income" : "Expense") + " logged");
     renderAll();
     // Enter in any quick-add field (amount, date, or note) already submits
     // the form via native implicit submission — this just sends focus back
@@ -1091,7 +1118,7 @@ function initEditSheet() {
     });
     saveState();
     closeEditSheet();
-    toast("Entry updated");
+    toastIfSaved("Entry updated");
     renderAll();
   });
 
@@ -1104,7 +1131,7 @@ function initEditSheet() {
     if (!entry) return;
     saveState();
     closeEditSheet();
-    toast("Entry deleted", () => {
+    toastIfSaved("Entry deleted", () => {
       undeleteEntry(entry.id);
       saveState();
       renderAll();

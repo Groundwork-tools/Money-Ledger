@@ -2777,6 +2777,90 @@ async function runTests(H,d){
     assert("saveState on a full origin does not throw out of the UI handler", saveThrew===false);
     assert("saveState on a full origin tells the user nothing more can be saved", /storage/i.test(toastText()) && /full/i.test(toastText()));
 
+    // ---- (quota investigation, 2026-10-10) an EDIT whose local save fails still reaches Drive.
+    // The sync tests above start from a record already on Drive; this one starts from the
+    // user's own edit: createEntry + saveState on a full origin, then the debounced push.
+    // Written to fail if saveState ever stops scheduling the push after a quota error.
+    // Passes today (control), same as Hours Ledger's Q1 row.
+    var idQ=await connected();
+    w.Storage.prototype.setItem=function(k){
+      if(String(k).indexOf("money-ledger-v1")===0) throw new w.DOMException("The quota has been exceeded.","QuotaExceededError");
+      return realSet.apply(this,arguments);
+    };
+    clearToast();
+    try{
+      H.createEntry({id:"quota-edit-1",date:"2026-10-02",amountMinor:123,direction:"expense",categoryId:"seed-groceries",note:"Q1 edit"});
+      H.saveState();
+      await sleep(1700); // saveState's 1200ms push debounce, plus the sync itself
+    } finally { w.Storage.prototype.setItem=realSet; }
+    assert("setup sanity: the edit's local save really failed (not in localStorage)",
+      (w.localStorage.getItem(LEDGER_KEY)||"").indexOf("quota-edit-1")===-1);
+    var driveFile=H.getFakeDrive()[idQ];
+    assert("quota: an edit whose local save failed still reaches Drive (debounced push)",
+      !!driveFile && driveFile.content.indexOf("quota-edit-1")!==-1);
+
+    // ---- (a) 2026-10-10: after a failed save, never show a success message for an entry that did not store.
+    // Order of events on a full origin, Drive NOT connected: saveState() sets the "Not saved" toast, then the
+    // handler immediately sets "Expense logged" in the same tick - the second replaces the first before any
+    // frame paints, so the person sees only the success text. With Drive connected the sync's own failed
+    // write puts "Not saved" back ~1.2s later (see CLAUDE.md, General fixes 2026-10-10).
+    function quotaOn(){
+      w.Storage.prototype.setItem=function(k){
+        if(String(k).indexOf("money-ledger-v1")===0) throw new w.DOMException("The quota has been exceeded.","QuotaExceededError");
+        return realSet.apply(this,arguments);
+      };
+    }
+    function quotaOff(){ w.Storage.prototype.setItem=realSet; }
+    function quickAdd(note){
+      d.getElementById("qaAmount").value="12.50"; d.getElementById("qaNote").value=note;
+      d.getElementById("quickaddForm").dispatchEvent(new w.Event("submit",{cancelable:true,bubbles:true}));
+    }
+    function entryByNote(note){ return H.getState().entries.filter(function(e){ return e.note===note; })[0]; }
+    function openEdit(id){ d.querySelector('#register [data-id="'+id+'"]').click(); }
+    H.resetState(); H.setView(2026,9);
+    var sa=H.getState(); sa.settings.currency="DKK"; H.setState(sa);
+    clearToast(); quickAdd("ok-1");
+    assert("[control] a quick-add that saved says 'Expense logged'", /Expense logged/.test(toastText()), "toast='"+toastText()+"'");
+    var okEntry=entryByNote("ok-1");
+    openEdit(okEntry.id); d.getElementById("editAmount").value="20.00";
+    clearToast(); d.getElementById("editForm").dispatchEvent(new w.Event("submit",{cancelable:true,bubbles:true}));
+    assert("[control] an edit that saved says 'Entry updated'", /Entry updated/.test(toastText()), "toast='"+toastText()+"'");
+    quotaOn(); clearToast(); quickAdd("lost-1"); var tAdd=toastText(); quotaOff();
+    assert("(a) a quick-add whose save failed does not say 'Expense logged'", !/logged/i.test(tAdd), "toast='"+tAdd.slice(0,70)+"'");
+    assert("(a) ...it says the entry was not saved", /not saved/i.test(tAdd), "toast='"+tAdd.slice(0,70)+"'");
+    openEdit(okEntry.id); d.getElementById("editAmount").value="30.00";
+    quotaOn(); clearToast(); d.getElementById("editForm").dispatchEvent(new w.Event("submit",{cancelable:true,bubbles:true})); var tEdit=toastText(); quotaOff();
+    assert("(a) an edit whose save failed does not say 'Entry updated'", !/updated/i.test(tEdit), "toast='"+tEdit.slice(0,70)+"'");
+    assert("(a) ...it says the change was not saved", /not saved/i.test(tEdit), "toast='"+tEdit.slice(0,70)+"'");
+    openEdit(okEntry.id);
+    quotaOn(); clearToast(); d.getElementById("editDelete").click(); var tDel=toastText(), undoShown=!d.getElementById("toastUndo").hidden; quotaOff();
+    assert("(a) a delete whose save failed does not say 'Entry deleted'", !/deleted/i.test(tDel), "toast='"+tDel.slice(0,70)+"'");
+    assert("(a) ...it says the change was not saved, and offers no Undo for a delete that never persisted", /not saved/i.test(tDel)&&!undoShown, "toast='"+tDel.slice(0,70)+"' undoShown="+undoShown);
+    // Drive connected: the success text must not appear first either, and the warning is still what is on screen at +1.4s
+    await connected();
+    quotaOn(); clearToast(); quickAdd("lost-2"); var tAdd2=toastText(); await sleep(1400); var tAdd2Late=toastText(); quotaOff();
+    assert("(a) Drive connected: a failed quick-add does not flash 'Expense logged' first", !/logged/i.test(tAdd2), "toast='"+tAdd2.slice(0,70)+"'");
+    assert("[control] Drive connected: 1.4s later the toast still says the save failed", /not saved/i.test(tAdd2Late), "toast='"+tAdd2Late.slice(0,70)+"'");
+    H.resetState();
+
+    // ---- (b) 2026-10-10: a NEW install on a full origin must still start. money-ledger-device-id is written
+    // at load (and again by loadState on a first install); an unguarded setItem threw out of the whole script
+    // before __ML_TEST__ existed / anything rendered.
+    var devKey="money-ledger-device-id-TESTMODE", keepDev=w.localStorage.getItem(devKey), keepLedger=w.localStorage.getItem(LEDGER_KEY);
+    w.localStorage.removeItem(devKey); w.localStorage.removeItem(LEDGER_KEY);
+    window.__quotaSeed={on:true,limit:0};
+    var fr=document.createElement("iframe"); fr.style.display="none";
+    fr.src="money-ledger-quota-frame.html?mltest=1&cb="+Date.now(); document.body.appendChild(fr);
+    for(var tries=0; tries<150 && !(fr.contentWindow.__ML_TEST__ && fr.contentDocument.readyState==="complete"); tries++) await sleep(40);
+    var started=!!fr.contentWindow.__ML_TEST__, optionCount=started?fr.contentDocument.getElementById("qaCategory").options.length:0;
+    var throwsSeen=fr.contentWindow.__quotaThrows;
+    assert("setup sanity (b): the frame's quota really refused writes at load", throwsSeen>=1, "refused writes="+throwsSeen);
+    assert("(b) new install on a full origin: the app starts (__ML_TEST__ exists)", started);
+    assert("(b) ...and renders (the quick-add category list is populated)", optionCount>0, "options="+optionCount);
+    fr.remove(); window.__quotaSeed=null;
+    if(keepDev!==null) w.localStorage.setItem(devKey,keepDev);
+    if(keepLedger!==null) w.localStorage.setItem(LEDGER_KEY,keepLedger);
+
     // ---- guarded: pure helpers + expiry + timer-driven retry
     if (typeof H.classifySyncError!=="function" || typeof H.tokenIsLapsed!=="function" ||
         typeof H.nextBackoffMs!=="function" || typeof H.setDriveTokenExpiresAt!=="function" ||

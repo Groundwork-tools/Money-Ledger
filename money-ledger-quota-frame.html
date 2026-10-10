@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>quota frame</title></head>
+<body>
+<!-- Test support for money-ledger-selftest.html; never linked from the app. Open as
+     money-ledger-quota-frame.html?mltest=1. Installs a localStorage whose setItem throws
+     QuotaExceededError once the origin would exceed a budget, BEFORE the real index.html is
+     written over this document (document.open keeps this URL, so location.search still carries
+     mltest=1, and the Storage override survives: same window). Budget lives in
+     window.__quota = {on, limit}, counted in characters (key + value); a write that does not
+     grow the total is allowed. The opener seeds it through window.parent.__quotaSeed. -->
+<script>
+(function(){
+  var seed=window.parent&&window.parent.__quotaSeed;
+  window.__quota={on:!!(seed&&seed.on),limit:seed?seed.limit:0};
+  var real=Storage.prototype.setItem;
+  function used(){
+    var n=0;
+    for(var i=0;i<localStorage.length;i++){ var k=localStorage.key(i); n+=k.length+localStorage.getItem(k).length; }
+    return n;
+  }
+  window.__quotaUsed=used;
+  window.__quotaThrows=0;
+  Storage.prototype.setItem=function(k,v){
+    if(window.__quota.on&&this===window.localStorage){
+      var old=this.getItem(k);
+      var after=used()-(old===null?0:String(k).length+old.length)+String(k).length+String(v).length;
+      if(after>window.__quota.limit){ window.__quotaThrows++; throw new DOMException("The quota has been exceeded.","QuotaExceededError"); }
+    }
+    return real.apply(this,arguments);
+  };
+  fetch("index.html?cb="+Date.now()).then(function(r){ return r.text(); }).then(function(html){
+    document.open(); document.write(html); document.close();
+  });
+})();
+</script>
+</body></html>
