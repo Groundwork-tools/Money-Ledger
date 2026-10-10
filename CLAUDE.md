@@ -106,6 +106,34 @@ something that contradicts a rule below, stop and say which rule.
     way and left zero permanent coverage behind; see "Testing before you
     claim it works" for the full diagnosis).
 
+11. **Every app on this origin shares ONE localStorage quota, and a new tool on
+    this domain inherits it.** An origin is scheme + host + port; the path is
+    not part of it, so `/Money-Ledger/`, `/Hours-Ledger/` and any tool added
+    later under `groundwork-tools.github.io` read and write the same ~5 MiB
+    store. (Measured in headless Chrome: 5,242,880 characters, key + value. The
+    phone that reported the bug read 5,169 KB when full in DevTools units of 2
+    bytes per character, roughly half as many characters as Chrome's limit;
+    that is the phone's report, not re-measured in WebKit.) Why this is a rule:
+    one app filling the store breaks the others. On 2026-10-10 Hours Ledger's
+    undo history (4,340 KB of that 5,169 KB) left this app unable to save, and
+    the screen said "Expense logged" while it was not stored (General fixes
+    2026-10-10 below). What follows:
+    - **Size the worst case before persisting anything new**, and say who else
+      pays for it. Anything that grows with use needs a cap or pruning rule
+      *when it is written*. This app's own spend is ~73,000 characters (the
+      phone: 143 KB in DevTools units); it keeps no undo stack, so it is the
+      smaller tenant - it is starved by the other app far more than it starves
+      it.
+    - **A write can fail, so failure is a code path**: handle
+      `QuotaExceededError` on EVERY localStorage write, including the ones at
+      load (the device-id write threw out of the whole script on a full origin
+      until 2026-10-10), and never show a success message for something that did
+      not store (`toastIfSaved()`).
+    - **A new tool is not isolated by its own path or repo.** To get its own
+      quota it needs its own origin (another host or a custom domain). Until
+      then it shares this budget. Keep Hours Ledger's matching rule (its rule
+      10, which carries the current numbers and the undo-cap reasoning) in step.
+
 ## Sync design decisions
 
 **Same-record conflicts: last-write-wins, not keep-both (2026-08-04).**
@@ -1950,6 +1978,32 @@ ledger-paper plainness *is* the trust signal.
    an overlay would misstate past months); multi-category comparison; a
    year view; a window selector.
 
+5. **Success toasts that don't check the save (opened 2026-10-10).** The
+   2026-10-10 fix routed only the *entry* toasts (quick-add, edit, delete and
+   its Undo, automatic recurring entries) through `toastIfSaved()`. Still
+   plain `toast()` straight after `saveState()`: `"<name>" deleted` (category,
+   with Undo), `Backup imported.`, `<label> cleared` (a whole month, with
+   Undo), and the Recurring item toasts (`added to Recurring`, `Recurring item
+   updated / resumed / paused`, `removed from Recurring`). Same defect: on a
+   full origin the success text replaces the "Not saved" warning in the same
+   tick and the person sees only the success text. It was left out because the
+   report was about entries and the fix was kept to what was asked (hard rule
+   7); it is not harmless, since an import or a month-clear that did not store
+   reads as done. Each needs the same fail-first test as the entry toasts (a
+   failing `setItem`, then the toast text), and the Undo variants must not
+   offer an Undo for a change that never persisted. Trigger: do it with
+   Hours Ledger's backlog 27 re-measure on 2026-11-10 at the latest, since both
+   depend on how soon the shared origin fills again.
+6. **Other localStorage writes that are not guarded (opened 2026-10-10, found
+   by reading, NOT run).** `saveDriveTokenCache()` writes the cached Drive
+   token with a bare `localStorage.setItem`; it runs on the connect and
+   reconnect paths, not at load, so it was not part of the load-time fix. On a
+   full origin it would throw out of the connect flow. Audit every
+   `localStorage.setItem` against hard rule 11 and add a test per site, as was
+   done for the device id. Also open: the "Not saved" toast disappears after
+   five seconds while the data stays unsaved; Hours Ledger uses a persistent
+   banner for the same condition.
+
 Do not add features that are not on this list without discussing them first.
 
 ## Out of scope
@@ -2015,6 +2069,11 @@ Do not add features that are not on this list without discussing them first.
     served files against local. This satisfies the privacy-policy-page
     dependency for the brand-verification path above — still not submitted,
     but no longer blocked on this piece.
+- GitHub Gist was considered and rejected as the sync target over Google
+  Drive: a "secret" gist is unlisted, not access-controlled — anyone with
+  the URL can read it. Worth revisiting only if a stronger case for it shows
+  up later.
+
 ## General fixes (2026-10-10, a full localStorage)
 
 Hours Ledger and Money Ledger share one origin and therefore one ~5 MB
@@ -2032,7 +2091,7 @@ Ledger's undo history), and Money Ledger could no longer save. Branch
   write landed (`lastSaveOk`) and the entry toasts (quick-add, edit, delete
   with its Undo, automatic recurring entries) go through `toastIfSaved()`.
   Not changed: success toasts for categories, recurring items, import and
-  clear - same shape, not part of this fix.
+  clear - same shape, not part of this fix (Backlog 5).
 - **A new install on a full origin still starts.** `money-ledger-device-id`
   was written unguarded at load (and again by `loadState()` on a first
   install); a full origin threw out of the script before anything rendered.
@@ -2045,8 +2104,10 @@ Ledger's undo history), and Money Ledger could no longer save. Branch
   `money-ledger-quota-frame.html` for the load-time case. Fail-first: 7 and
   2. Not tested: the rethrow of a non-quota error in `persistDeviceId()`
   (read only).
-
-- GitHub Gist was considered and rejected as the sync target over Google
-  Drive: a "secret" gist is unlisted, not access-controlled — anyone with
-  the URL can read it. Worth revisiting only if a stronger case for it shows
-  up later.
+- **Export backup on a full origin works (ran, headless Chrome, 2026-10-10).**
+  With the origin exactly full and nothing left to free, "Export backup
+  (.json)" downloaded `money-ledger-backup-<today>.json` (~100 KB) with all 33
+  categories, 22 recurring items and every original entry unaltered, plus the
+  entries the app logs for due recurring items at load and one that failed to
+  save - those exist only in memory, and the file includes them. Not tested:
+  how a phone presents the downloaded file.
