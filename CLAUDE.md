@@ -2111,3 +2111,22 @@ Ledger's undo history), and Money Ledger could no longer save. Branch
   entries the app logs for due recurring items at load and one that failed to
   save - those exist only in memory, and the file includes them. Not tested:
   how a phone presents the downloaded file.
+- **Phone verification (reported by Sebastian, 2026-10-10; written down here on
+  his word, not observed from this tool).** A real iPhone, Chrome (WebKit),
+  over plain http from the laptop (`192.168.1.69:8000`, serving
+  `~/Desktop/hl-staging`), Drive never connected, synthetic prefill data.
+  - *Ran, pre-fix build, presets 1 and 3:* Money Ledger showed "Expense logged"
+    and lost the entry on reload - the defect the toast fix is about, seen on a
+    real device. One earlier first attempt did NOT fail; unexplained, not
+    investigated.
+  - *Ran, fix build, undo key at phone size, presets 1 and 3:* the entry
+    saved and survived reload (Hours Ledger's undo key had shrunk first, which
+    is what freed the room); Export backup about 100 KB.
+  - *Ran, fix build, undo key already small, preset 1:* "Not saved on this
+    device" instead of a success message; the entry was gone after reload, as
+    expected; Export backup 101 KB.
+  - ***Not covered:*** preset 2; Safari; the real origin
+    (`groundwork-tools.github.io`); the Drive-connected path, including the
+    "Expense logged" then "Not saved" order and its fix; the contents of the
+    export's unsaved entry (only its size was checked); the new-install
+    device-id fix (the rig writes that key, as a used phone already has it).
