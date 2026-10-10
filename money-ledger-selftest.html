@@ -2799,6 +2799,51 @@ async function runTests(H,d){
     assert("quota: an edit whose local save failed still reaches Drive (debounced push)",
       !!driveFile && driveFile.content.indexOf("quota-edit-1")!==-1);
 
+    // ---- (a) 2026-10-10: after a failed save, never show a success message for an entry that did not store.
+    // Order of events on a full origin, Drive NOT connected: saveState() sets the "Not saved" toast, then the
+    // handler immediately sets "Expense logged" in the same tick - the second replaces the first before any
+    // frame paints, so the person sees only the success text. With Drive connected the sync's own failed
+    // write puts "Not saved" back ~1.2s later (see CLAUDE.md, General fixes 2026-10-10).
+    function quotaOn(){
+      w.Storage.prototype.setItem=function(k){
+        if(String(k).indexOf("money-ledger-v1")===0) throw new w.DOMException("The quota has been exceeded.","QuotaExceededError");
+        return realSet.apply(this,arguments);
+      };
+    }
+    function quotaOff(){ w.Storage.prototype.setItem=realSet; }
+    function quickAdd(note){
+      d.getElementById("qaAmount").value="12.50"; d.getElementById("qaNote").value=note;
+      d.getElementById("quickaddForm").dispatchEvent(new w.Event("submit",{cancelable:true,bubbles:true}));
+    }
+    function entryByNote(note){ return H.getState().entries.filter(function(e){ return e.note===note; })[0]; }
+    function openEdit(id){ d.querySelector('#register [data-id="'+id+'"]').click(); }
+    H.resetState(); H.setView(2026,9);
+    var sa=H.getState(); sa.settings.currency="DKK"; H.setState(sa);
+    clearToast(); quickAdd("ok-1");
+    assert("[control] a quick-add that saved says 'Expense logged'", /Expense logged/.test(toastText()), "toast='"+toastText()+"'");
+    var okEntry=entryByNote("ok-1");
+    openEdit(okEntry.id); d.getElementById("editAmount").value="20.00";
+    clearToast(); d.getElementById("editForm").dispatchEvent(new w.Event("submit",{cancelable:true,bubbles:true}));
+    assert("[control] an edit that saved says 'Entry updated'", /Entry updated/.test(toastText()), "toast='"+toastText()+"'");
+    quotaOn(); clearToast(); quickAdd("lost-1"); var tAdd=toastText(); quotaOff();
+    assert("(a) a quick-add whose save failed does not say 'Expense logged'", !/logged/i.test(tAdd), "toast='"+tAdd.slice(0,70)+"'");
+    assert("(a) ...it says the entry was not saved", /not saved/i.test(tAdd), "toast='"+tAdd.slice(0,70)+"'");
+    openEdit(okEntry.id); d.getElementById("editAmount").value="30.00";
+    quotaOn(); clearToast(); d.getElementById("editForm").dispatchEvent(new w.Event("submit",{cancelable:true,bubbles:true})); var tEdit=toastText(); quotaOff();
+    assert("(a) an edit whose save failed does not say 'Entry updated'", !/updated/i.test(tEdit), "toast='"+tEdit.slice(0,70)+"'");
+    assert("(a) ...it says the change was not saved", /not saved/i.test(tEdit), "toast='"+tEdit.slice(0,70)+"'");
+    openEdit(okEntry.id);
+    quotaOn(); clearToast(); d.getElementById("editDelete").click(); var tDel=toastText(), undoShown=!d.getElementById("toastUndo").hidden; quotaOff();
+    assert("(a) a delete whose save failed does not say 'Entry deleted'", !/deleted/i.test(tDel), "toast='"+tDel.slice(0,70)+"'");
+    assert("(a) ...it says the change was not saved, and offers no Undo for a delete that never persisted", /not saved/i.test(tDel)&&!undoShown, "toast='"+tDel.slice(0,70)+"' undoShown="+undoShown);
+    // Drive connected: the success text must not appear first either, and the warning is still what is on screen at +1.4s
+    await connected();
+    quotaOn(); clearToast(); quickAdd("lost-2"); var tAdd2=toastText(); await sleep(1400); var tAdd2Late=toastText(); quotaOff();
+    assert("(a) Drive connected: a failed quick-add does not flash 'Expense logged' first", !/logged/i.test(tAdd2), "toast='"+tAdd2.slice(0,70)+"'");
+    assert("[control] Drive connected: 1.4s later the toast still says the save failed", /not saved/i.test(tAdd2Late), "toast='"+tAdd2Late.slice(0,70)+"'");
+    H.resetState();
+
+
     // ---- guarded: pure helpers + expiry + timer-driven retry
     if (typeof H.classifySyncError!=="function" || typeof H.tokenIsLapsed!=="function" ||
         typeof H.nextBackoffMs!=="function" || typeof H.setDriveTokenExpiresAt!=="function" ||
