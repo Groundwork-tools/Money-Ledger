@@ -2078,8 +2078,9 @@ Do not add features that are not on this list without discussing them first.
 
 Hours Ledger and Money Ledger share one origin and therefore one ~5 MB
 localStorage quota on GitHub Pages; a real phone filled it (mostly Hours
-Ledger's undo history), and Money Ledger could no longer save. Branch
-`investigate/quota-full`, not merged.
+Ledger's undo history), and Money Ledger could no longer save. Merged to
+`main` as `7bb34cf`. **Incident closed 2026-10-10** (real-phone record at the
+end of this section). Backlog 5 and 6 are follow-ups and remain open.
 
 - **A failed save never shows a success message for an entry.** Found by
   recording every text the toast was set to: with Drive NOT connected,
@@ -2130,3 +2131,26 @@ Ledger's undo history), and Money Ledger could no longer save. Branch
     "Expense logged" then "Not saved" order and its fix; the contents of the
     export's unsaved entry (only its size was checked); the new-install
     device-id fix (the rig writes that key, as a used phone already has it).
+    (The real-origin and Drive-connected gaps are partly closed by the next
+    record.)
+- **Real phone, real origin, after the merge (observed by Sebastian himself,
+  2026-10-10; written down here on his report, not observed from this tool).**
+  iPhone, Chrome (WebKit), `groundwork-tools.github.io` itself, Drive
+  connected, running the merged `main`.
+  - *Ran:* Money Ledger: an expense was logged with no "Not saved" toast and it
+    survived a reload. This was the original symptom and it is gone. Hours
+    Ledger on the same phone: no red box, real categories and entries loaded,
+    a new entry saved and survived a reload. Sync worked in both directions:
+    both new entries arrived on the laptop. He deleted his test entries
+    afterwards.
+  - ***Not verified:*** the undo key shrinking on the real phone (that check was
+    skipped; working saves are indirect evidence only); local-only users on the
+    real origin (Drive was connected for this run); preset 2; Safari. The
+    failing-save path with Drive connected (the "Expense logged" then "Not
+    saved" order and its fix) was not exercised on the phone, because every
+    save succeeded. The first pre-fix attempt on the staging rig that did not
+    fail is still unexplained.
+  - **Incident closed, 2026-10-10.** What stays open is the follow-up backlog,
+    not the incident: Backlog 5 (the remaining success toasts that do not check
+    the save) and Backlog 6 (other unguarded localStorage writes, found by
+    reading and not run). Neither is done.
